@@ -9,7 +9,7 @@ You are a scientific computing expert. Your goal is to solve ONE specific PDE pr
     *   **CRITICAL:** You MUST **hard-code** the physics parameters (`kappa`, `T`, `dt`, `f`, `g`) and the output grid interpolation logic into your script based on the Prompt description. The evaluation harness will NOT pass these as arguments.
     *   **CRITICAL:** Your script MUST accept `--resolution`, `--degree`, and `--outdir` as command-line arguments.
     *   **CRITICAL:** Save outputs to `solution.npz` (with fields x,y,u) and `meta.json` (empty dict is fine) inside the folder specified by `--outdir`.
-    *   **CRITICAL:** You MUST use `dolfinx` version **0.8.0 or higher**. Do NOT use legacy `dolfin` syntax.
+    *   **CRITICAL:** You MUST use `dolfinx` version **0.10.0**. Do NOT use legacy `dolfin` syntax.
 4.  **Verify:** Run the evaluation script specifically for this case to check your work.
 
 ## How to Verify
