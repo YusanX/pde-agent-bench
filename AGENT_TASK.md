@@ -1,38 +1,34 @@
-# Agent Task: Optimize Linear Solver Performance
-
-## Background
-PDEBench is a benchmark suite for Partial Differential Equations. The current default linear solver strategy (`baseline.py`) is very basic, leading to suboptimal efficiency on complex cases.
-
-We need you to act as a **High-Performance Computing (HPC) Optimization Engineer**. Your task is to modify the solver code to improve performance while maintaining physical correctness.
+# Agent Task: Optimize Linear Solver Performance (PDEBench)
 
 ## Goal
-Optimize the `solve_linear` function in `pdebench/pdebench/linsolve/baseline.py` to achieve **lower Total Wall Time** in the benchmark suite.
+Improve runtime in `python scripts/benchmark_score.py` by optimizing ONLY the iterative solver implementation,
+while preserving numerical correctness.
 
-## Actions You Can Take
-1. **Change KSP Type**: Try GMRES (`gmres`), MinRes (`minres`), BiCGSTAB (`bcgs`), etc.
-2. **Change Preconditioner**: Try ILU (`ilu`), SOR (`sor`), GAMG (`gamg`), ICC (`icc`), etc.
-3. **Parameter Tuning**: Adjust convergence tolerances (`rtol`, `atol`) carefully, ensuring accuracy is preserved.
-4. **Adaptive Strategy**: Implement logic to dynamically select the best solver strategy based on matrix properties (e.g., size, symmetry) or PDE type.
+## File to modify (STRICT)
+- ONLY modify: `pdebench/linsolve/baseline.py`
+- DO NOT modify: any file under `cases/`, `tests/`, `pdebench/linsolve/reference.py` (or `solve_linear_direct`), or evaluation code.
 
-## Constraints (Strictly Follow)
-1. **ONLY Modify** `pdebench/pdebench/linsolve/baseline.py`.
-2. **DO NOT Modify** any JSON case files in `pdebench/cases/`.
-3. **DO NOT Modify** any test code in `pdebench/tests/`.
-4. **DO NOT Modify** the `solve_linear_direct` function (this is the Ground Truth for reference).
-5. You must ensure **100% Pass Rate** for all demo cases.
+## Correctness constraints (MUST HOLD)
+For every demo case in `scripts/benchmark_score.py`:
+1) KSP must CONVERGE: `converged == True` and `converged_reason > 0`.
+2) Accuracy must not degrade: the case must still meet its `targets.metric <= targets.target_error`.
+3) Residual quality must not degrade: require `rel_res <= 1e-8` (or the project’s existing threshold).
 
-## How to Verify Your Work
+If any case violates these, the optimization is invalid even if it looks faster.
 
-1. **Run Benchmark**:
-   ```bash
-   python scripts/benchmark_score.py --log-history --experiment-id "<YOUR_MODEL_NAME>_run"
-   ```
-   **CRITICAL**: You MUST use `--log-history` to record your score. Replace `<YOUR_MODEL_NAME>` with your specific model name (e.g., `gpt4o_run`, `claude4.5_run`).
-   
-2. **Check Results**:
-   - The output will show a `🏆 Final Score Summary`.
-   - Focus on **`Total Wall Time`** (Lower is Better) and **`Success Rate`** (Must be 10/10).
-   - If the success rate drops, your optimization has compromised accuracy and must be reverted or fixed.
+## Allowed actions
+- Change KSP type (cg/gmres/minres/bcgs)
+- Change PC (jacobi/ilu/icc/gamg/sor)
+- Tune KSP tolerances and max_it, but do NOT weaken correctness constraints above.
+- Add a lightweight adaptive heuristic (e.g., choose CG for symmetric SPD-like matrices, GMRES otherwise).
 
-## Expected Output
-A modified `pdebench/pdebench/linsolve/baseline.py` that achieves a faster runtime than the original version in `scripts/benchmark_score.py` while passing all tests.
+## Benchmark protocol (MUST FOLLOW)
+1) First record BASELINE score (no code changes):
+   `python scripts/benchmark_score.py --log-history --experiment-id "<MODEL>_baseline"`
+2) Then implement your optimization and re-run:
+   `python scripts/benchmark_score.py --log-history --experiment-id "<MODEL>_opt"`
+3) Your final output must include:
+   - The best `Total Wall Time` you achieved (from the logged summary)
+   - Confirmation that Success Rate is 10/10 AND all correctness constraints hold
+
+Use `<MODEL>` as a short identifier like `gpt52`, `claude45`, etc.
