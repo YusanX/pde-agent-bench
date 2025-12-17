@@ -1,46 +1,26 @@
-# Agent Task: Physics-to-Code Generation Benchmark (PDEBench)
+# Task: Solve a Specific PDE Case
 
-## Goal
-Solve the PDE problems described in the dataset by generating a **complete, executable Python script** for each case. Your script must use the `dolfinx` library to solve the problem and save the result.
+You are a scientific computing expert. Your goal is to solve ONE specific PDE problem from the dataset and verify it.
 
-## Workflow (Must Follow)
-1.  **Read the Problem:** The system will provide you with a problem description (Prompt) from `datasets/level_2_1_basic.jsonl`.
-2.  **Generate Code:** Write a Python script that solves the problem.
-    *   **Strict Requirement:** Your script MUST accept command-line arguments `--resolution` (int) and `--degree` (int).
-    *   **Strict Requirement:** Your script MUST save the solution to `solution.npz` containing arrays `x`, `y`, and `u` (interpolated on a regular grid defined by the problem bounds).
-    *   **Library:** Use `dolfinx` (FEniCSx) and `petsc4py`.
-    *   **Version Hint:** The environment uses `dolfinx` v0.8.0+.
-    *   Use `dolfinx.geometry.bb_tree(domain, domain.topology.dim)` instead of `BoundingBoxTree(...)`.
-    *   Use `dolfinx.geometry.compute_collisions_points` for point collision detection.
-    *   Ensure `LinearProblem` initialization includes `petsc_options_prefix`.
-3.  **Submit & Evaluate:** The system will run your script in a sandbox and compare your result against a hidden Oracle solution.
+## Steps
+1.  **Read the Data:** Read the file `datasets/level_2_1_basic.jsonl` and extract the JSON object from the **first line** (Case ID: `heat_grid_target`).
+2.  **Understand the Prompt:** Read the `prompt` field carefully. It contains specific parameters (diffusion coefficient `kappa`, time `T`, `dt`, etc.) and the required Output Grid size (e.g., 50x50).
+3.  **Write the Solver:** Create a Python script named `my_solver.py` that solves this SPECIFIC problem.
+    *   **CRITICAL:** You MUST **hard-code** the physics parameters (`kappa`, `T`, `dt`, `f`, `g`) and the output grid interpolation logic into your script based on the Prompt description. The evaluation harness will NOT pass these as arguments.
+    *   **CRITICAL:** Your script MUST accept `--resolution`, `--degree`, and `--outdir` as command-line arguments.
+    *   **CRITICAL:** Save outputs to `solution.npz` (with fields x,y,u) and `meta.json` (empty dict is fine) inside the folder specified by `--outdir`.
+    *   **CRITICAL:** You MUST use `dolfinx` version **0.8.0 or higher**. Do NOT use legacy `dolfin` syntax.
+4.  **Verify:** Run the evaluation script specifically for this case to check your work.
 
-## Benchmark Execution Command
-To run the benchmark using `swe-agent` (or similar tools calling this task), use the following command structure. This command runs the evaluation pipeline which acts as the harness for your generated code.
+## How to Verify
+Run the following command to evaluate your solver against the specific case:
 
 ```bash
 python scripts/evaluate_agent.py \
     --dataset datasets/level_2_1_basic.jsonl \
-    --outdir results/agent_evaluation_$(date +%Y%m%d_%H%M%S) \
-    --agent-script <PATH_TO_YOUR_GENERATED_SCRIPT>
+    --agent-script my_solver.py \
+    --outdir results/test_run \
+    --limit 1
 ```
 
-**Note:** In a real "Code Agent" scenario, you (the Agent) are the one writing `<PATH_TO_YOUR_GENERATED_SCRIPT>`. The harness (`evaluate_agent.py`) will iteratively:
-1.  Read a case from `--dataset`.
-2.  Present the prompt to you (simulated or real).
-3.  Take your code, save it to a file.
-4.  Run it via `python your_script.py --resolution 32 --degree 1`.
-5.  Validate the output `solution.npz`.
-
-## Interactive Testing Mode (for You, the Agent)
-If you want to test your ability to solve *one* specific case manually:
-1.  Read the first line of `datasets/level_2_1_basic.jsonl` to get the Prompt.
-2.  Write a script `my_solver.py`.
-3.  Run it yourself: `python my_solver.py --resolution 32 --degree 1`.
-4.  Check if `solution.npz` is generated.
-
-## Success Criteria
-*   **Executability:** The script runs without error.
-*   **Accuracy:** Relative L2 error vs. Oracle < 0.05 (typically).
-*   **Format:** The output `solution.npz` has the correct shape and keys.
-
+If the output shows "SUCCESS" or "PASS", you have completed the task.
