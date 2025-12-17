@@ -264,7 +264,7 @@ def generate_summary_report(
     print(f"\n{'='*80}")
     print("📊 评测结果详情")
     print(f"{'='*80}")
-    print(f"{'Case ID':<30} | {'状态':^6} | {'耗时(s)':>8} | {'迭代':>5} | {'备注':<20}")
+    print(f"{'Case ID':<32} | {'状态':^6} | {'耗时(s)':>9} | {'备注':<25}")
     print("-" * 80)
     
     for r in results:
@@ -282,19 +282,11 @@ def generate_summary_report(
             rel_error = accuracy.get('rel_L2_error', float('nan'))
             note = f"L2err={rel_error:.2e}"
         else:
-            note = r.get('error', 'execution failed')[:20]
+            error_msg = r.get('error', 'execution failed')
+            # Truncate long error messages
+            note = error_msg[:25] if len(error_msg) <= 25 else error_msg[:22] + "..."
         
-        # Get iterations from execution info (if available)
-        iters = "N/A"
-        if exec_info and 'stdout' in exec_info:
-            # Try to extract iteration count from output
-            import re
-            stdout = exec_info.get('stdout', '')
-            match = re.search(r'iters[\'"]?\s*:\s*(\d+)', stdout)
-            if match:
-                iters = match.group(1)
-        
-        print(f"{status_icon} {case_id:<28} | {'PASS' if success else 'FAIL':^6} | {wall_time:>8.4f} | {str(iters):>5} | {note:<20}")
+        print(f"{status_icon} {case_id:<30} | {'PASS' if success else 'FAIL':^6} | {wall_time:>9.4f} | {note:<25}")
     
     print("-" * 80)
     
