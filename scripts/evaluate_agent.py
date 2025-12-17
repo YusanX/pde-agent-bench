@@ -51,9 +51,9 @@ def evaluate_single_case(
     Returns:
         Dictionary with evaluation results
     """
-    print(f"\n{'='*60}")
-    print(f"Evaluating: {case_id}")
-    print(f"{'='*60}")
+    print(f"\n{'─'*80}")
+    print(f"🔬 正在评测: {case_id}")
+    print(f"{'─'*80}")
     
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -68,11 +68,16 @@ def evaluate_single_case(
             evaluation_config=evaluation_config
         )
         
-        print(f"  Agent execution: {'✓ Success' if exec_result.success else '✗ Failed'}")
-        print(f"  Wall time: {exec_result.wall_time_sec:.2f}s")
+        exec_icon = "✅" if exec_result.success else "❌"
+        print(f"  {exec_icon} 执行状态: {'成功' if exec_result.success else '失败'}")
+        print(f"  ⏱️  运行耗时: {exec_result.wall_time_sec:.2f}s")
         
         if not exec_result.success:
-            print(f"  Error: {exec_result.error_message}")
+            error_msg = exec_result.error_message or "未知错误"
+            # Truncate long error messages
+            if len(error_msg) > 150:
+                error_msg = error_msg[:150] + "..."
+            print(f"  ⚠️  错误信息: {error_msg}")
             
             return {
                 'case_id': case_id,
@@ -89,8 +94,9 @@ def evaluate_single_case(
             evaluation_config=evaluation_config
         )
         
-        print(f"  Validation: {'✓ Pass' if validation_result.is_valid else '✗ Fail'}")
-        print(f"  {validation_result.reason}")
+        val_icon = "🎯" if validation_result.is_valid else "❌"
+        print(f"  {val_icon} 验证结果: {'通过' if validation_result.is_valid else '未通过'}")
+        print(f"  📊 {validation_result.reason}")
         
         result = {
             'case_id': case_id,
@@ -254,18 +260,61 @@ def generate_summary_report(
     with open(output_file, 'w') as f:
         json.dump(report, f, indent=2)
     
-    # Print summary to console
-    print(f"\n{'='*60}")
-    print("EVALUATION SUMMARY")
-    print(f"{'='*60}")
-    print(f"Total cases:      {total_cases}")
-    print(f"Successful:       {successful_cases} ({success_rate*100:.1f}%)")
-    print(f"Failed:           {failed_cases}")
-    print(f"\nAccuracy Statistics:")
-    print(f"  Avg rel L2 error: {avg_L2_error:.3e}")
-    print(f"  Min rel L2 error: {min_L2_error:.3e}")
-    print(f"  Max rel L2 error: {max_L2_error:.3e}")
-    print(f"\nDetailed report saved to: {output_file}")
+    # Print beautiful summary to console
+    print(f"\n{'='*80}")
+    print("📊 评测结果详情")
+    print(f"{'='*80}")
+    print(f"{'Case ID':<30} | {'状态':^6} | {'耗时(s)':>8} | {'迭代':>5} | {'备注':<20}")
+    print("-" * 80)
+    
+    for r in results:
+        case_id = r.get('case_id', 'unknown')
+        success = r.get('success', False)
+        status_icon = "✅" if success else "❌"
+        
+        # Extract metrics
+        exec_info = r.get('execution', {})
+        wall_time = exec_info.get('wall_time_sec', 0.0) if exec_info else 0.0
+        
+        val_info = r.get('validation', {})
+        if val_info:
+            accuracy = val_info.get('accuracy', {})
+            rel_error = accuracy.get('rel_L2_error', float('nan'))
+            note = f"L2err={rel_error:.2e}"
+        else:
+            note = r.get('error', 'execution failed')[:20]
+        
+        # Get iterations from execution info (if available)
+        iters = "N/A"
+        if exec_info and 'stdout' in exec_info:
+            # Try to extract iteration count from output
+            import re
+            stdout = exec_info.get('stdout', '')
+            match = re.search(r'iters[\'"]?\s*:\s*(\d+)', stdout)
+            if match:
+                iters = match.group(1)
+        
+        print(f"{status_icon} {case_id:<28} | {'PASS' if success else 'FAIL':^6} | {wall_time:>8.4f} | {str(iters):>5} | {note:<20}")
+    
+    print("-" * 80)
+    
+    # Calculate total time
+    total_time = sum(r.get('execution', {}).get('wall_time_sec', 0.0) 
+                     for r in results if r.get('execution'))
+    
+    print(f"\n{'='*80}")
+    print("🏆 最终得分摘要")
+    print(f"{'='*80}")
+    print(f"📊 总耗时 (越低越好): {total_time:.4f} 秒")
+    print(f"✓  通过率: {successful_cases}/{total_cases} ({success_rate*100:.1f}%)")
+    
+    if not all(x != x for x in [avg_L2_error]):  # Check if not NaN
+        print(f"📈 平均相对误差: {avg_L2_error:.3e}")
+        print(f"   最小误差: {min_L2_error:.3e}")
+        print(f"   最大误差: {max_L2_error:.3e}")
+    
+    print(f"{'='*80}")
+    print(f"\n💾 详细报告已保存至: {output_file}")
 
 
 def main():
@@ -327,13 +376,22 @@ Examples:
         parser.error(f"Dataset file not found: {args.dataset}")
     
     # Load dataset
-    print(f"Loading dataset: {args.dataset}")
+    print(f"\n{'='*80}")
+    print(f"🚀 PDEBench 评测系统")
+    print(f"{'='*80}")
+    print(f"📁 数据集: {args.dataset}")
+    
     entries = load_dataset(str(args.dataset))
     
     if args.limit:
         entries = entries[:args.limit]
+        print(f"📦 加载案例: {len(entries)} 个 (限制前 {args.limit} 个)")
+    else:
+        print(f"📦 加载案例: {len(entries)} 个")
     
-    print(f"Loaded {len(entries)} cases")
+    print(f"🤖 Agent 模式: {'Mock Agent (Oracle)' if args.mock_agent else f'自定义脚本 ({args.agent_script})'}")
+    print(f"📤 输出目录: {args.outdir}")
+    print(f"{'='*80}")
     
     # Create output directory
     args.outdir.mkdir(parents=True, exist_ok=True)
@@ -342,7 +400,7 @@ Examples:
     results = []
     
     for i, entry in enumerate(entries, 1):
-        print(f"\n[{i}/{len(entries)}] Case: {entry.id}")
+        print(f"\n[{i}/{len(entries)}] 📋 案例: {entry.id}")
         
         case_outdir = args.outdir / entry.id
         
