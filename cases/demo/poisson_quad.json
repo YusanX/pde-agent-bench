@@ -1,0 +1,58 @@
+{
+  "id": "poisson_quad",
+  "pde": {
+    "type": "poisson",
+    "description": "Poisson on quadrilateral mesh",
+    "coefficients": {
+      "kappa": {
+        "type": "constant",
+        "value": 2.0
+      }
+    },
+    "manufactured_solution": {
+      "u": "exp(x)*cos(2*pi*y)"
+    }
+  },
+  "domain": {
+    "type": "unit_square"
+  },
+  "mesh": {
+    "resolution": 14,
+    "cell_type": "quadrilateral"
+  },
+  "fem": {
+    "family": "Lagrange",
+    "degree": 1
+  },
+  "bc": {
+    "dirichlet": {
+      "on": "all",
+      "value": "u"
+    }
+  },
+  "targets": {
+    "target_error": 0.01,
+    "metric": "rel_L2_fe"
+  },
+  "expose_parameters": [
+    "mesh.resolution",
+    "fem.degree",
+    "ksp.type",
+    "ksp.rtol",
+    "pc.type"
+  ],
+  "output": {
+    "format": "npz",
+    "grid": {
+      "bbox": [
+        0,
+        1,
+        0,
+        1
+      ],
+      "nx": 45,
+      "ny": 45
+    },
+    "save_xdmf": false
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "wall_time_sec": 0.0003032684326171875,
+  "peak_rss_mb": 110.796875,
+  "solver_info": {
+    "ksp_type": "cg",
+    "pc_type": "jacobi",
+    "rtol": 1e-10,
+    "iters": 210,
+    "num_timesteps": 10
+  },
+  "exposed_parameters": {
+    "mesh.resolution": 12,
+    "fem.degree": 1,
+    "time.dt": 0.01,
+    "ksp.type": "cg",
+    "ksp.rtol": 1e-10,
+    "pc.type": "jacobi"
+  }
+}

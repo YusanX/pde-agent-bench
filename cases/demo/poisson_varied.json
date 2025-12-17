@@ -1,0 +1,58 @@
+{
+  "id": "poisson_varied",
+  "pde": {
+    "type": "poisson",
+    "description": "Poisson with constant kappa, smooth solution",
+    "coefficients": {
+      "kappa": {
+        "type": "constant",
+        "value": 0.5
+      }
+    },
+    "manufactured_solution": {
+      "u": "cos(pi*x)*cos(pi*y)"
+    }
+  },
+  "domain": {
+    "type": "unit_square"
+  },
+  "mesh": {
+    "resolution": 18,
+    "cell_type": "triangle"
+  },
+  "fem": {
+    "family": "Lagrange",
+    "degree": 1
+  },
+  "bc": {
+    "dirichlet": {
+      "on": "all",
+      "value": "u"
+    }
+  },
+  "targets": {
+    "target_error": 0.005,
+    "metric": "rel_L2_fe"
+  },
+  "expose_parameters": [
+    "mesh.resolution",
+    "fem.degree",
+    "ksp.type",
+    "ksp.rtol",
+    "pc.type"
+  ],
+  "output": {
+    "format": "npz",
+    "grid": {
+      "bbox": [
+        0,
+        1,
+        0,
+        1
+      ],
+      "nx": 55,
+      "ny": 55
+    },
+    "save_xdmf": false
+  }
+}

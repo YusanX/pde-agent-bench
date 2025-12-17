@@ -1,0 +1,5 @@
+{
+  "pde_type": "poisson",
+  "num_dofs": 361,
+  "has_exact": true
+}

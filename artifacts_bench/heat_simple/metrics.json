@@ -1,0 +1,14 @@
+{
+  "rel_L2_grid": 2.256379163587553e-08,
+  "rel_L2_grid_vs_exact": 2.256379163587553e-08,
+  "rel_L2_fe": 0.03844158256792915,
+  "rel_H1_semi_fe": 0.038487435014917394,
+  "cost": {
+    "wall_time_sec": 0.0003032684326171875,
+    "iters": 210
+  },
+  "validity": {
+    "pass": true,
+    "reason": "rel_L2_fe=3.844e-02 <= target=5.000e-02"
+  }
+}

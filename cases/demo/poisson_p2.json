@@ -1,0 +1,58 @@
+{
+  "id": "poisson_p2",
+  "pde": {
+    "type": "poisson",
+    "description": "Poisson with P2 elements",
+    "coefficients": {
+      "kappa": {
+        "type": "constant",
+        "value": 1.0
+      }
+    },
+    "manufactured_solution": {
+      "u": "x**2 + y**2"
+    }
+  },
+  "domain": {
+    "type": "unit_square"
+  },
+  "mesh": {
+    "resolution": 12,
+    "cell_type": "triangle"
+  },
+  "fem": {
+    "family": "Lagrange",
+    "degree": 2
+  },
+  "bc": {
+    "dirichlet": {
+      "on": "all",
+      "value": "u"
+    }
+  },
+  "targets": {
+    "target_error": 1e-09,
+    "metric": "rel_L2_fe"
+  },
+  "expose_parameters": [
+    "mesh.resolution",
+    "fem.degree",
+    "ksp.type",
+    "ksp.rtol",
+    "pc.type"
+  ],
+  "output": {
+    "format": "npz",
+    "grid": {
+      "bbox": [
+        0,
+        1,
+        0,
+        1
+      ],
+      "nx": 40,
+      "ny": 40
+    },
+    "save_xdmf": false
+  }
+}

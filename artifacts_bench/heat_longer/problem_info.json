@@ -1,0 +1,8 @@
+{
+  "pde_type": "heat",
+  "num_dofs": 225,
+  "num_timesteps": 10,
+  "dt": 0.02,
+  "t_final": 0.19999999999999998,
+  "has_exact": true
+}

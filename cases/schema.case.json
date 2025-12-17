@@ -1,0 +1,237 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://example.org/pdebench.schema.case.json",
+    "title": "PDEBench Case Spec",
+    "type": "object",
+    "required": ["id", "pde", "domain", "mesh", "fem", "bc", "targets", "output"],
+    "additionalProperties": false,
+  
+    "properties": {
+      "id": {
+        "type": "string",
+        "pattern": "^[a-zA-Z0-9_\\-\\.]+$",
+        "description": "Unique case identifier."
+      },
+  
+      "pde": {
+        "type": "object",
+        "required": ["type"],
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["poisson", "heat"],
+            "description": "Supported PDE families for the demo."
+          },
+          "description": {
+            "type": "string",
+            "description": "Optional human-readable description."
+          },
+  
+          "coefficients": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kappa": { "$ref": "#/$defs/field" }
+            }
+          },
+  
+          "manufactured_solution": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "u": {
+                "type": "string",
+                "description": "Analytic u(x,y[,t]) expression as a string (used for exact error)."
+              },
+              "u0": {
+                "type": "string",
+                "description": "Initial condition u(x,y,0). Optional if u provides it."
+              }
+            }
+          },
+  
+          "source_term": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "f": {
+                "type": "string",
+                "description": "Source term f(x,y[,t]). If absent and manufactured_solution.u is given, f will be derived."
+              }
+            }
+          },
+  
+          "time": {
+            "type": "object",
+            "description": "Only for heat equation.",
+            "additionalProperties": false,
+            "properties": {
+              "t0": { "type": "number", "default": 0.0 },
+              "t_end": { "type": "number" },
+              "dt": { "type": "number" },
+              "scheme": { "type": "string", "enum": ["backward_euler"], "default": "backward_euler" }
+            },
+            "required": ["t_end", "dt"]
+          }
+        },
+  
+        "allOf": [
+          {
+            "if": { "properties": { "type": { "const": "heat" } } },
+            "then": { "required": ["time"] }
+          }
+        ]
+      },
+  
+      "domain": {
+        "type": "object",
+        "required": ["type"],
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["unit_square"],
+            "description": "Demo uses unit_square only; extend later."
+          }
+        }
+      },
+  
+      "mesh": {
+        "type": "object",
+        "required": ["resolution"],
+        "additionalProperties": false,
+        "properties": {
+          "resolution": {
+            "type": "integer",
+            "minimum": 4,
+            "description": "Mesh resolution parameter (e.g., N for UnitSquareMesh)."
+          },
+          "cell_type": {
+            "type": "string",
+            "enum": ["triangle", "quadrilateral"],
+            "default": "triangle"
+          }
+        }
+      },
+  
+      "fem": {
+        "type": "object",
+        "required": ["family", "degree"],
+        "additionalProperties": false,
+        "properties": {
+          "family": { "type": "string", "enum": ["Lagrange"], "default": "Lagrange" },
+          "degree": { "type": "integer", "minimum": 1, "maximum": 4 }
+        }
+      },
+  
+      "bc": {
+        "type": "object",
+        "required": ["dirichlet"],
+        "additionalProperties": false,
+        "properties": {
+          "dirichlet": {
+            "type": "object",
+            "required": ["on", "value"],
+            "additionalProperties": false,
+            "properties": {
+              "on": {
+                "type": "string",
+                "enum": ["all"],
+                "description": "Demo: apply on all boundaries."
+              },
+              "value": {
+                "type": "string",
+                "description": "Dirichlet value expression g(x,y[,t]). If manufactured_solution.u is present, may be 'u'."
+              }
+            }
+          }
+        }
+      },
+  
+      "targets": {
+        "type": "object",
+        "required": ["target_error", "metric"],
+        "additionalProperties": false,
+        "properties": {
+          "target_error": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Requested accuracy threshold (used for pass/fail and time-to-accuracy)."
+          },
+          "metric": {
+            "type": "string",
+            "enum": ["rel_L2_grid", "rel_L2_fe", "rel_H1_semi_fe"],
+            "description": "Which accuracy metric the target_error applies to."
+          }
+        }
+      },
+  
+      "expose_parameters": {
+        "type": "array",
+        "description": "List of solver knobs that must be reported in output metadata.",
+        "items": {
+          "type": "string",
+          "enum": ["mesh.resolution", "fem.degree", "time.dt", "ksp.type", "ksp.rtol", "pc.type"]
+        },
+        "default": ["mesh.resolution", "fem.degree", "ksp.type", "ksp.rtol", "pc.type"]
+      },
+  
+      "output": {
+        "type": "object",
+        "required": ["format", "grid"],
+        "additionalProperties": false,
+        "properties": {
+          "format": { "type": "string", "enum": ["npz"], "default": "npz" },
+          "grid": {
+            "type": "object",
+            "required": ["bbox", "nx", "ny"],
+            "additionalProperties": false,
+            "properties": {
+              "bbox": {
+                "type": "array",
+                "minItems": 4,
+                "maxItems": 4,
+                "items": { "type": "number" },
+                "description": "[xmin, xmax, ymin, ymax]"
+              },
+              "nx": { "type": "integer", "minimum": 8 },
+              "ny": { "type": "integer", "minimum": 8 }
+            }
+          },
+          "save_xdmf": { "type": "boolean", "default": false }
+        }
+      }
+    },
+  
+    "$defs": {
+      "field": {
+        "type": "object",
+        "description": "Coefficient field definition.",
+        "required": ["type"],
+        "additionalProperties": false,
+        "properties": {
+          "type": { "type": "string", "enum": ["constant", "piecewise_x", "expr", "random_field"] },
+  
+          "value": { "type": "number" },
+  
+          "left": { "type": "number" },
+          "right": { "type": "number" },
+          "x_split": { "type": "number", "default": 0.5 },
+  
+          "expr": { "type": "string" },
+  
+          "seed": { "type": "integer" },
+          "amplitude": { "type": "number", "default": 1.0 }
+        },
+  
+        "allOf": [
+          { "if": { "properties": { "type": { "const": "constant" } } }, "then": { "required": ["value"] } },
+          { "if": { "properties": { "type": { "const": "piecewise_x" } } }, "then": { "required": ["left", "right"] } },
+          { "if": { "properties": { "type": { "const": "expr" } } }, "then": { "required": ["expr"] } },
+          { "if": { "properties": { "type": { "const": "random_field" } } }, "then": { "required": ["seed", "amplitude"] } }
+        ]
+      }
+    }
+  }
+  

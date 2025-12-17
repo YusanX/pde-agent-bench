@@ -1,0 +1,65 @@
+{
+  "id": "heat_longer",
+  "pde": {
+    "type": "heat",
+    "description": "Heat equation with longer time evolution",
+    "coefficients": {
+      "kappa": {
+        "type": "constant",
+        "value": 0.5
+      }
+    },
+    "manufactured_solution": {
+      "u": "exp(-2*t)*cos(pi*x)*cos(pi*y)"
+    },
+    "time": {
+      "t0": 0.0,
+      "t_end": 0.2,
+      "dt": 0.02,
+      "scheme": "backward_euler"
+    }
+  },
+  "domain": {
+    "type": "unit_square"
+  },
+  "mesh": {
+    "resolution": 14,
+    "cell_type": "triangle"
+  },
+  "fem": {
+    "family": "Lagrange",
+    "degree": 1
+  },
+  "bc": {
+    "dirichlet": {
+      "on": "all",
+      "value": "u"
+    }
+  },
+  "targets": {
+    "target_error": 0.05,
+    "metric": "rel_L2_fe"
+  },
+  "expose_parameters": [
+    "mesh.resolution",
+    "fem.degree",
+    "time.dt",
+    "ksp.type",
+    "ksp.rtol",
+    "pc.type"
+  ],
+  "output": {
+    "format": "npz",
+    "grid": {
+      "bbox": [
+        0,
+        1,
+        0,
+        1
+      ],
+      "nx": 45,
+      "ny": 45
+    },
+    "save_xdmf": false
+  }
+}

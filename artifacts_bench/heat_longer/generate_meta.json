@@ -1,0 +1,8 @@
+{
+  "phase": "generate",
+  "wall_time_sec": 0.2376689910888672,
+  "peak_rss_mb": 110.59375,
+  "mesh_resolution": 14,
+  "fem_degree": 1,
+  "num_dofs": 225
+}

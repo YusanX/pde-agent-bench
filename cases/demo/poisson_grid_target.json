@@ -1,0 +1,58 @@
+{
+  "id": "poisson_grid_target",
+  "pde": {
+    "type": "poisson",
+    "description": "Poisson targeting grid-based metric",
+    "coefficients": {
+      "kappa": {
+        "type": "constant",
+        "value": 1.0
+      }
+    },
+    "manufactured_solution": {
+      "u": "sin(2*pi*x)*sin(2*pi*y)"
+    }
+  },
+  "domain": {
+    "type": "unit_square"
+  },
+  "mesh": {
+    "resolution": 20,
+    "cell_type": "triangle"
+  },
+  "fem": {
+    "family": "Lagrange",
+    "degree": 1
+  },
+  "bc": {
+    "dirichlet": {
+      "on": "all",
+      "value": "u"
+    }
+  },
+  "targets": {
+    "target_error": 0.01,
+    "metric": "rel_L2_grid"
+  },
+  "expose_parameters": [
+    "mesh.resolution",
+    "fem.degree",
+    "ksp.type",
+    "ksp.rtol",
+    "pc.type"
+  ],
+  "output": {
+    "format": "npz",
+    "grid": {
+      "bbox": [
+        0,
+        1,
+        0,
+        1
+      ],
+      "nx": 60,
+      "ny": 60
+    },
+    "save_xdmf": false
+  }
+}
