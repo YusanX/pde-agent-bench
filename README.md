@@ -294,7 +294,6 @@ python -m pdebench.cli run cases/demo/poisson_simple.json \
 | **输出** | 完整求解脚本 | 数值解 |
 | **难点** | 数值稳定性意识 | 计算效率 |
 | **验证** | 网格无关插值 | 固定网格 |
-| **目标会议** | NeurIPS / ICML | SC / SIAM |
 
 ## 🔮 未来工作
 
