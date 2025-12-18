@@ -73,10 +73,8 @@ def evaluate_single_case(
         print(f"  ⏱️  运行耗时: {exec_result.wall_time_sec:.2f}s")
         
         if not exec_result.success:
-            error_msg = exec_result.error_message or "未知错误"
+            error_msg = exec_result.stderr or "未知错误"
             # Truncate long error messages
-            if len(error_msg) > 150:
-                error_msg = error_msg[:150] + "..."
             print(f"  ⚠️  错误信息: {error_msg}")
             
             return {
@@ -87,23 +85,45 @@ def evaluate_single_case(
                 'total_time_sec': time.time() - t_start,
             }
         
-        # Validate solution
+        # Validate solution (计时)
+        t_val_start = time.time()
         validation_result = validate_solution(
             agent_outdir=agent_outdir,
             oracle_outdir=oracle_outdir,
             evaluation_config=evaluation_config
         )
+        exec_result.t_validation = time.time() - t_val_start
         
         val_icon = "🎯" if validation_result.is_valid else "❌"
         print(f"  {val_icon} 验证结果: {'通过' if validation_result.is_valid else '未通过'}")
         print(f"  📊 {validation_result.reason}")
+        
+        # 提取 DoF 信息（从 oracle problem_info）
+        dof = None
+        problem_info_path = oracle_outdir / 'problem_info.json'
+        if problem_info_path.exists():
+            try:
+                with open(problem_info_path) as f:
+                    info = json.load(f)
+                    dof = info.get('num_dofs')
+            except:
+                pass
         
         result = {
             'case_id': case_id,
             'success': validation_result.is_valid,
             'execution': exec_result.to_dict(),
             'validation': validation_result.to_dict(),
-            'total_time_sec': time.time() - t_start,
+            'timing': {
+                't_agent': exec_result.t_agent_run,
+                't_oracle': exec_result.t_oracle_run,
+                't_validation': exec_result.t_validation,
+                't_total': time.time() - t_start,
+            },
+            'cost': {  # 新增：代价指标
+                'dof': dof,
+                'time_per_dof': exec_result.t_agent_run / dof if dof else None,
+            },
         }
         
         # Save case result
@@ -209,6 +229,23 @@ def generate_summary_report(
     
     success_rate = successful_cases / total_cases if total_cases > 0 else 0.0
     
+    # 计算 Pass@ε 统计（多档精度通过率）
+    pass_at_eps = {}
+    precision_levels = ['1e-2', '1e-3', '1e-4', 'default']
+    
+    for level in precision_levels:
+        passed_count = 0
+        for r in results:
+            val = r.get('validation')
+            if val and 'target' in val:
+                passed_levels = val['target'].get('passed_levels', [])
+                if level in passed_levels:
+                    passed_count += 1
+        if total_cases > 0:
+            pass_at_eps[f'Pass@{level}'] = passed_count / total_cases
+        else:
+            pass_at_eps[f'Pass@{level}'] = 0.0
+    
     # Compute statistics
     valid_results = [r for r in results if r.get('validation') is not None]
     
@@ -227,19 +264,36 @@ def generate_summary_report(
         max_L2_error = float('nan')
         min_L2_error = float('nan')
     
-    # Group by level
+    # Group by level（从 dataset entry 获取）
     level_stats = {}
     for r in results:
-        # Extract level from case_id (assumes format like "poisson_simple")
-        # In a real implementation, this should come from the dataset entry
-        level = "unknown"
+        level = r.get('level', 'unknown')
         
         if level not in level_stats:
-            level_stats[level] = {'total': 0, 'passed': 0}
+            level_stats[level] = {'total': 0, 'passed': 0, 'pass_rate': 0.0}
         
         level_stats[level]['total'] += 1
         if r.get('success', False):
             level_stats[level]['passed'] += 1
+    
+    # 计算每个 level 的通过率
+    for level in level_stats:
+        total = level_stats[level]['total']
+        passed = level_stats[level]['passed']
+        level_stats[level]['pass_rate'] = passed / total if total > 0 else 0.0
+    
+    # 计算时间统计（仅 agent 时间）
+    agent_times = [r.get('timing', {}).get('t_agent', 0.0) for r in results if r.get('success')]
+    avg_agent_time = sum(agent_times) / len(agent_times) if agent_times else 0.0
+    total_agent_time = sum(agent_times)
+    
+    # 计算 Leaderboard 评分（按 PassRate → Time → Error 排序）
+    leaderboard_score = {
+        'pass_rate': success_rate,  # 主排序
+        'total_agent_time': total_agent_time,  # 次排序（越低越好）
+        'avg_error': avg_L2_error,  # 第三排序（越低越好）
+        'ranking_formula': 'PassRate(↑) → TotalTime(↓) → AvgError(↓)',
+    }
     
     report = {
         'summary': {
@@ -248,10 +302,16 @@ def generate_summary_report(
             'failed_cases': failed_cases,
             'success_rate': success_rate,
         },
+        'leaderboard_score': leaderboard_score,  # 新增：排行榜评分
+        'pass_at_epsilon': pass_at_eps,  # 多档精度通过率
         'accuracy_statistics': {
             'avg_rel_L2_error': avg_L2_error,
             'min_rel_L2_error': min_L2_error,
             'max_rel_L2_error': max_L2_error,
+        },
+        'timing_statistics': {
+            'total_agent_time': total_agent_time,
+            'avg_agent_time': avg_agent_time,
         },
         'level_breakdown': level_stats,
         'cases': results,
@@ -264,7 +324,7 @@ def generate_summary_report(
     print(f"\n{'='*80}")
     print("📊 评测结果详情")
     print(f"{'='*80}")
-    print(f"{'Case ID':<32} | {'状态':^6} | {'耗时(s)':>9} | {'备注':<25}")
+    print(f"{'Case ID':<28} | {'状态':^6} | {'耗时(s)':>8} | {'DoF':>8} | {'备注':<20}")
     print("-" * 80)
     
     for r in results:
@@ -273,35 +333,55 @@ def generate_summary_report(
         status_icon = "✅" if success else "❌"
         
         # Extract metrics
-        exec_info = r.get('execution', {})
-        wall_time = exec_info.get('wall_time_sec', 0.0) if exec_info else 0.0
+        timing = r.get('timing', {})
+        t_agent = timing.get('t_agent', 0.0)
+        
+        # Extract DoF
+        cost = r.get('cost', {})
+        dof = cost.get('dof', None)
+        dof_str = f"{dof:8d}" if dof else "    N/A"
         
         val_info = r.get('validation', {})
         if val_info:
             accuracy = val_info.get('accuracy', {})
             rel_error = accuracy.get('rel_L2_error', float('nan'))
-            note = f"L2err={rel_error:.2e}"
+            note = f"L2={rel_error:.2e}"
         else:
             error_msg = r.get('error', 'execution failed')
             # Truncate long error messages
-            note = error_msg[:25] if len(error_msg) <= 25 else error_msg[:22] + "..."
+            note = error_msg[:20] if len(error_msg) <= 20 else error_msg[:17] + "..."
         
-        print(f"{status_icon} {case_id:<30} | {'PASS' if success else 'FAIL':^6} | {wall_time:>9.4f} | {note:<25}")
+        print(f"{status_icon} {case_id:<26} | {'PASS' if success else 'FAIL':^6} | {t_agent:>8.3f} | {dof_str} | {note:<20}")
     
     print("-" * 80)
     
-    # Calculate total time
-    total_time = sum(r.get('execution', {}).get('wall_time_sec', 0.0) 
-                     for r in results if r.get('execution'))
+    # Calculate total time (分离 agent 和总时间)
+    agent_times_all = [r.get('timing', {}).get('t_agent', 0.0) for r in results]
+    total_agent_time = sum(agent_times_all)
+    
+    total_time_all = sum(r.get('timing', {}).get('t_total', 0.0) for r in results)
     
     print(f"\n{'='*80}")
     print("🏆 最终得分摘要")
     print(f"{'='*80}")
-    print(f"📊 总耗时 (越低越好): {total_time:.4f} 秒")
-    print(f"✓  通过率: {successful_cases}/{total_cases} ({success_rate*100:.1f}%)")
+    print(f"⏱️  Agent 总耗时: {total_agent_time:.4f} 秒 (不含 Oracle)")
+    print(f"⏱️  评测总耗时: {total_time_all:.4f} 秒 (含 Oracle + Validation)")
+    print(f"✓  基础通过率: {successful_cases}/{total_cases} ({success_rate*100:.1f}%)")
+    
+    # 显示 Pass@ε 统计
+    print(f"\n📊 多档精度通过率 (Pass@ε):")
+    for eps_name, pass_rate in sorted(pass_at_eps.items()):
+        print(f"   {eps_name}: {pass_rate*100:.1f}%")
+    
+    # 显示 Level breakdown
+    if level_stats and len(level_stats) > 1:  # 只在有多个 level 时显示
+        print(f"\n📋 按难度分级统计:")
+        for level, stats in sorted(level_stats.items()):
+            print(f"   Level {level}: {stats['passed']}/{stats['total']} ({stats['pass_rate']*100:.1f}%)")
     
     if not all(x != x for x in [avg_L2_error]):  # Check if not NaN
-        print(f"📈 平均相对误差: {avg_L2_error:.3e}")
+        print(f"\n📈 误差统计 (通过案例):")
+        print(f"   平均相对误差: {avg_L2_error:.3e}")
         print(f"   最小误差: {min_L2_error:.3e}")
         print(f"   最大误差: {max_L2_error:.3e}")
     
@@ -412,6 +492,9 @@ Examples:
             evaluation_config=entry.evaluation_config,
             output_dir=case_outdir
         )
+        
+        # 添加 level 信息
+        result['level'] = entry.level
         
         results.append(result)
     
