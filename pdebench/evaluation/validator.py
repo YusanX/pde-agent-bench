@@ -104,11 +104,20 @@ def validate_solution(
         y_agent = agent_sol['y']
         u_agent = agent_sol['u']
         
-        # Load oracle reference
-        oracle_ref = np.load(oracle_outdir / 'reference.npz')
-        x_oracle = oracle_ref['x']
-        y_oracle = oracle_ref['y']
-        u_oracle = oracle_ref['u_star']
+        # Load oracle reference (prefer exact solution if available)
+        exact_path = oracle_outdir / 'exact.npz'
+        if exact_path.exists():
+            # Use exact analytical solution for validation (more accurate)
+            oracle_ref = np.load(exact_path)
+            x_oracle = oracle_ref['x']
+            y_oracle = oracle_ref['y']
+            u_oracle = oracle_ref['u_exact']
+        else:
+            # Fall back to numerical reference solution
+            oracle_ref = np.load(oracle_outdir / 'reference.npz')
+            x_oracle = oracle_ref['x']
+            y_oracle = oracle_ref['y']
+            u_oracle = oracle_ref['u_star']
         
     except FileNotFoundError as e:
         return ValidationResult(

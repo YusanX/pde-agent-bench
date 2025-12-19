@@ -155,27 +155,54 @@ def interpolate_ufl_expression(func, expr):
 
 def sample_on_grid(u_fem, bbox, nx, ny):
     """
-    Sample FE function on regular grid.
+    Sample FE function on regular grid using correct cell lookup.
+    
+    This function properly identifies which cell each grid point belongs to
+    before evaluating the FEM solution at that point.
     
     Returns:
         x_grid: (nx,) array
         y_grid: (ny,) array
         u_grid: (ny, nx) array
     """
+    from dolfinx import geometry
+    
     xmin, xmax, ymin, ymax = bbox
     x_grid = np.linspace(xmin, xmax, nx)
     y_grid = np.linspace(ymin, ymax, ny)
     
-    u_grid = np.zeros((ny, nx))
+    # Create meshgrid points (note: indexing='ij' for row-major ordering)
+    xx, yy = np.meshgrid(x_grid, y_grid, indexing='ij')
     
-    for j, yval in enumerate(y_grid):
-        for i, xval in enumerate(x_grid):
-            point = np.array([[xval, yval, 0.0]])
-            try:
-                u_grid[j, i] = u_fem.eval(point, [0])[0]
-            except:
-                # Point outside domain or other eval error
-                u_grid[j, i] = np.nan
+    # Flatten to (N, 3) array for dolfinx
+    points = np.zeros((nx * ny, 3))
+    points[:, 0] = xx.ravel()
+    points[:, 1] = yy.ravel()
+    # points[:, 2] is already 0.0
+    
+    # Find cells for all points using bounding box tree
+    msh = u_fem.function_space.mesh
+    bb_tree = geometry.bb_tree(msh, msh.topology.dim)
+    cell_candidates = geometry.compute_collisions_points(bb_tree, points)
+    colliding_cells = geometry.compute_colliding_cells(msh, cell_candidates, points)
+    
+    # Evaluate at each point with its correct cell
+    u_grid = np.full(points.shape[0], np.nan)
+    points_on_proc, cells_on_proc, eval_map = [], [], []
+    
+    for i, point in enumerate(points):
+        if len(colliding_cells.links(i)) > 0:
+            points_on_proc.append(point)
+            cells_on_proc.append(colliding_cells.links(i)[0])
+            eval_map.append(i)
+    
+    if len(points_on_proc) > 0:
+        u_values = u_fem.eval(np.array(points_on_proc), 
+                              np.array(cells_on_proc, dtype=np.int32))
+        u_grid[eval_map] = u_values.flatten()
+    
+    # Reshape to (nx, ny) for output
+    u_grid = u_grid.reshape(nx, ny)
     
     return x_grid, y_grid, u_grid
 
