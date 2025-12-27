@@ -106,7 +106,5 @@ python scripts/build_cases.py --cases case_id
 - `pdebench/templates/prompts.py`: Prompt 生成模板
 - `pdebench/templates/scripts.py`: 测试脚本模板
 
-## 📖 更多信息
 
-详见项目根目录的 `REFACTORING_SUMMARY.md`。
 
