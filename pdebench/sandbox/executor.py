@@ -61,47 +61,63 @@ def execute_agent_script(
     script_path: Path,
     outdir: Path,
     timeout_sec: int = 300,
+    mode: str = 'autonomous',
     **test_params
 ) -> ExecutionResult:
     """
     Execute agent-generated script in a sandbox environment.
     
-    All test parameters (resolution, degree, dt, etc.) are passed via **test_params
-    and converted to CLI arguments automatically.
-    
     Args:
         script_path: Path to the Python script to execute
         outdir: Output directory for solution files
         timeout_sec: Maximum execution time in seconds
-        **test_params: Test parameters (resolution, degree, dt, etc.)
+        mode: Execution mode
+            - 'autonomous' (default): Agent decides parameters (only passes --outdir)
+            - 'guided': System passes parameters via CLI (for backward compatibility)
+        **test_params: Test parameters (only used if mode='guided')
             Common parameters:
             - resolution: int - Mesh resolution
             - degree: int - Polynomial degree
             - dt: float - Time step (for time-dependent PDEs)
-            - velocity_degree: int - Velocity space degree (for Stokes)
-            - pressure_degree: int - Pressure space degree (for Stokes)
     
     Returns:
         ExecutionResult containing execution status and outputs
     
-    Example:
+    Example (Autonomous mode - recommended):
         >>> result = execute_agent_script(
         ...     script_path=Path('solver.py'),
         ...     outdir=Path('output'),
         ...     timeout_sec=300,
-        ...     resolution=128,
-        ...     degree=2,
-        ...     dt=0.01
+        ...     mode='autonomous'
         ... )
+        # Agent decides its own parameters
+    
+    Example (Guided mode - backward compatible):
+        >>> result = execute_agent_script(
+        ...     script_path=Path('solver.py'),
+        ...     outdir=Path('output'),
+        ...     timeout_sec=300,
+        ...     mode='guided',
+        ...     resolution=128,
+        ...     degree=2
+        ... )
+        # System passes parameters to agent
     """
     outdir.mkdir(parents=True, exist_ok=True)
     
-    # Prepare command with all test parameters
+    # Prepare command - always include outdir
     cmd = ['python', str(script_path), '--outdir', str(outdir)]
     
-    # Add all test parameters as CLI arguments
-    for key, value in test_params.items():
-        cmd.extend([f'--{key}', str(value)])
+    # Add test parameters only in guided mode
+    if mode == 'guided':
+        for key, value in test_params.items():
+            cmd.extend([f'--{key}', str(value)])
+    elif mode == 'autonomous':
+        # In autonomous mode, agent decides its own parameters
+        # We only pass --outdir
+        pass
+    else:
+        raise ValueError(f"Unknown execution mode: {mode}. Must be 'autonomous' or 'guided'")
     
     # Start timing
     t_start = time.time()
@@ -166,6 +182,169 @@ def execute_agent_script(
         stderr=stderr,
         t_agent_run=wall_time,
         wall_time_sec=wall_time,  # 向后兼容
+        timeout_occurred=timeout_occurred,
+        memory_exceeded=memory_exceeded,
+        solution_file=solution_file if success else None,
+        meta_file=meta_file if success else None,
+        error_message=error_message,
+    )
+
+
+def execute_agent_function(
+    script_path: Path,
+    outdir: Path,
+    case_spec: Dict[str, Any],
+    timeout_sec: int = 300,
+) -> ExecutionResult:
+    """
+    Execute agent script by calling solve(case_spec) and let evaluator write outputs.
+    """
+    outdir.mkdir(parents=True, exist_ok=True)
+    case_file = outdir / "case_spec.json"
+    case_file.write_text(json.dumps(case_spec))
+    runner_path = outdir / "_runner.py"
+
+    runner_code = f"""import argparse
+import json
+import time
+import importlib.util
+import numpy as np
+
+def _load_module(path):
+    spec = importlib.util.spec_from_file_location("agent_module", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+def _get_solver_fn(module):
+    if hasattr(module, "solve") and callable(module.solve):
+        return module.solve
+    if hasattr(module, "solve_case") and callable(module.solve_case):
+        return module.solve_case
+    raise AttributeError("Expected solve(case_spec) or solve_case(case_spec) in agent script")
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--script", required=True)
+    parser.add_argument("--case", required=True)
+    parser.add_argument("--outdir", required=True)
+    args = parser.parse_args()
+
+    with open(args.case) as f:
+        case_spec = json.load(f)
+
+    solver = _get_solver_fn(_load_module(args.script))
+
+    t0 = time.time()
+    result = solver(case_spec)
+    t1 = time.time()
+
+    if not isinstance(result, dict):
+        raise ValueError("solve() must return a dict with keys: u (or u_grid) and solver_info")
+
+    u_grid = result.get("u")
+    if u_grid is None:
+        u_grid = result.get("u_grid")
+    solver_info = result.get("solver_info", {{}})
+
+    if u_grid is None:
+        raise ValueError("solve() returned no solution array")
+    if not isinstance(solver_info, dict) or not solver_info:
+        raise ValueError("solve() must return non-empty solver_info dict")
+
+    required_keys = ["mesh_resolution", "element_degree", "ksp_type", "pc_type", "rtol"]
+    missing = [k for k in required_keys if k not in solver_info]
+    if missing:
+        raise ValueError(f"solver_info missing required keys: {{missing}}")
+
+    u_grid = np.array(u_grid)
+
+    grid = case_spec["oracle_config"]["output"]["grid"]
+    nx, ny = grid["nx"], grid["ny"]
+    if u_grid.ndim == 1 and u_grid.size == nx * ny:
+        u_grid = u_grid.reshape((nx, ny))
+    if u_grid.shape != (nx, ny):
+        raise ValueError(f"Expected u_grid shape ({{nx}}, {{ny}}), got {{u_grid.shape}}")
+
+    x = np.linspace(grid["bbox"][0], grid["bbox"][1], nx)
+    y = np.linspace(grid["bbox"][2], grid["bbox"][3], ny)
+    np.savez(f"{{args.outdir}}/solution.npz", x=x, y=y, u=u_grid)
+
+    meta = {{
+        "wall_time_sec": t1 - t0,
+        "solver_info": solver_info,
+    }}
+    with open(f"{{args.outdir}}/meta.json", "w") as f:
+        json.dump(meta, f, indent=2)
+
+if __name__ == "__main__":
+    main()
+"""
+    runner_path.write_text(runner_code)
+
+    cmd = [
+        "python",
+        str(runner_path),
+        "--script",
+        str(script_path),
+        "--case",
+        str(case_file),
+        "--outdir",
+        str(outdir),
+    ]
+
+    t_start = time.time()
+    timeout_occurred = False
+    memory_exceeded = False
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+        )
+        exit_code = result.returncode
+        stdout = result.stdout
+        stderr = result.stderr
+    except subprocess.TimeoutExpired:
+        timeout_occurred = True
+        exit_code = -1
+        stdout = ""
+        stderr = f"Execution timeout after {timeout_sec} seconds"
+    except Exception as e:
+        exit_code = -1
+        stdout = ""
+        stderr = f"Execution error: {str(e)}"
+
+    t_end = time.time()
+    wall_time = t_end - t_start
+    success = (exit_code == 0) and not timeout_occurred
+
+    solution_file = outdir / "solution.npz"
+    meta_file = outdir / "meta.json"
+
+    if success:
+        if not solution_file.exists():
+            success = False
+            error_message = "Required output file 'solution.npz' not found"
+        elif not meta_file.exists():
+            success = False
+            error_message = "Required output file 'meta.json' not found"
+        else:
+            error_message = None
+    else:
+        error_message = stderr if stderr else "Unknown execution failure"
+        solution_file = None
+        meta_file = None
+
+    return ExecutionResult(
+        success=success,
+        exit_code=exit_code,
+        stdout=stdout,
+        stderr=stderr,
+        t_agent_run=wall_time,
+        wall_time_sec=wall_time,
         timeout_occurred=timeout_occurred,
         memory_exceeded=memory_exceeded,
         solution_file=solution_file if success else None,

@@ -107,7 +107,7 @@ a = ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx
 L = ufl.inner(f, v) * ufl.dx
 ```
 
-## 6. Solvers
+## 6. Solvers (dolfinx 0.10.0)
 
 ### A. Linear Problem (High-Level)
 
@@ -115,8 +115,9 @@ The easiest way to solve $a(u, v) = L(v)$.
 
 ```python
 problem = petsc.LinearProblem(
-    a, L, bcs=[bc], 
-    petsc_options={"ksp_type": "preonly", "pc_type": "lu"}
+    a, L, bcs=[bc],
+    petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+    petsc_options_prefix="pdebench_"
 )
 u_sol = problem.solve()
 ```
@@ -134,8 +135,10 @@ L_form = fem.form(L)
 A = petsc.assemble_matrix(a_form, bcs=[bc])
 A.assemble()
 
-# 3. Create Vector
-b = fem.Function(V)
+# 3. Create Vector (PETSc Vec) for RHS
+# Note: dolfinx 0.10.0 expects an iterable of function spaces in create_vector
+# You can pass [V] or L_form.function_spaces
+b = petsc.create_vector(L_form.function_spaces)
 
 # 4. Solver Setup
 solver = PETSc.KSP().create(domain.comm)
@@ -146,19 +149,19 @@ solver.getPC().setType(PETSc.PC.Type.LU)
 # Inside time loop:
 #   - Update time-dependent constants/functions
 #   - Assemble RHS
-with b.vector.localForm() as loc:
+with b.localForm() as loc:
     loc.set(0)
-petsc.assemble_vector(b.vector, L_form)
+petsc.assemble_vector(b, L_form)
 
 #   - Apply Lifting (for non-zero Dirichlet BCs on RHS)
-petsc.apply_lifting(b.vector, [a_form], bcs=[[bc]])
-b.vector.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+petsc.apply_lifting(b, [a_form], bcs=[[bc]])
+b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
 
 #   - Apply BCs to RHS
-petsc.set_bc(b.vector, [bc])
+petsc.set_bc(b, [bc])
 
 #   - Solve
-solver.solve(b.vector, u_sol.vector)
+solver.solve(b, u_sol.x.petsc_vec)
 u_sol.x.scatter_forward()
 ```
 
@@ -207,15 +210,32 @@ def probe_points(u_func, points_array):
     points_array: shape (3, N) numpy array
     """
     bb_tree = geometry.bb_tree(domain, domain.topology.dim)
-    
+
     # Find cells colliding with points
     cell_candidates = geometry.compute_collisions_points(bb_tree, points_array.T)
     colliding_cells = geometry.compute_colliding_cells(domain, cell_candidates, points_array.T)
-    
-    # Evaluate
-    # u_values shape: (num_points, value_size)
-    u_values = u_func.eval(points_array.T, colliding_cells.array)
+
+    # Build per-point mapping (avoid boolean mask mismatch)
+    points_on_proc = []
+    cells_on_proc = []
+    eval_map = []
+    for i in range(points_array.shape[1]):
+        links = colliding_cells.links(i)
+        if len(links) > 0:
+            points_on_proc.append(points_array.T[i])
+            cells_on_proc.append(links[0])
+            eval_map.append(i)
+
+    u_values = np.full((points_array.shape[1],), np.nan)
+    if len(points_on_proc) > 0:
+        vals = u_func.eval(np.array(points_on_proc), np.array(cells_on_proc, dtype=np.int32))
+        u_values[eval_map] = vals.flatten()
     return u_values
+
+**Common error:** 
+`IndexError: boolean index did not match indexed array`  
+Cause: using `colliding_cells.array` with a boolean mask of different length.  
+Fix: use `colliding_cells.links(i)` and build `points_on_proc/cells_on_proc` mapping as above.
 ```
 
 ## 9. Common Pitfalls & Checklist
@@ -227,4 +247,15 @@ def probe_points(u_func, points_array):
 3.  **Form Compilation**: Always wrap UFL expressions with `fem.form(...)` if you are not using `LinearProblem` / `NonlinearProblem` which do it internally.
 4.  **Dimension Matching**: In `locate_dofs_topological`, ensure the entity dimension (`fdim`) matches the facets you found.
 5.  **Interpolation**: `u.interpolate(f)` requires `f` to handle input shape `(3, N)` and return `(value_size, N)` or `(N,)` for scalars.
+6.  **interpolation_points API (0.10.0)**: `V.element.interpolation_points` is a property, not a callable.
+    *   Bad: `V.element.interpolation_points()`
+    *   Good: `V.element.interpolation_points`
+7.  **fem.Expression expects UFL, not Python callables**:
+    *   Bad: `fem.Expression(lambda x: ..., V.element.interpolation_points)`
+    *   Good: build a UFL expression and pass it, e.g.:
+        `f_expr = 2*ufl.pi**2*ufl.sin(ufl.pi*x[0])*ufl.sin(ufl.pi*x[1])`
+        then `fem.Expression(f_expr, V.element.interpolation_points)`
+8.  **LinearProblem requires petsc_options_prefix (0.10.0)**:
+    *   Bad: missing `petsc_options_prefix` argument
+    *   Good: pass `petsc_options_prefix="your_prefix_"` to avoid runtime error
 

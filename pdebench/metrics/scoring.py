@@ -203,3 +203,4 @@ def compute_aggregate_score(case_scores: list[float]) -> dict[str, float]:
         'pass_rate': float(np.sum(scores_array > 0) / len(scores_array))
     }
 
+

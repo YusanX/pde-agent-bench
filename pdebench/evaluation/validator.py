@@ -107,6 +107,29 @@ def validate_solution(
         y_agent = agent_sol['y']
         u_agent = agent_sol['u']
         
+        # Validate agent meta.json (check if agent reported its parameter choices)
+        agent_meta_path = agent_outdir / 'meta.json'
+        agent_params = {}
+        if agent_meta_path.exists():
+            with open(agent_meta_path) as f:
+                agent_meta = json.load(f)
+                solver_info = agent_meta.get('solver_info', {})
+                
+                # Extract agent's parameter choices
+                agent_params = {
+                    'resolution': solver_info.get('mesh_resolution', 'unknown'),
+                    'degree': solver_info.get('element_degree', 'unknown'),
+                    'ksp_type': solver_info.get('ksp_type', 'unknown'),
+                    'pc_type': solver_info.get('pc_type', 'unknown'),
+                    'rationale': solver_info.get('rationale', '')
+                }
+                
+                # Warn if agent didn't report parameter choices
+                if agent_params['resolution'] == 'unknown':
+                    print("⚠️  Warning: Agent did not report mesh_resolution in solver_info")
+                if agent_params['degree'] == 'unknown':
+                    print("⚠️  Warning: Agent did not report element_degree in solver_info")
+        
         # Load oracle reference (prefer exact solution if available)
         exact_path = oracle_outdir / 'exact.npz'
         if exact_path.exists():

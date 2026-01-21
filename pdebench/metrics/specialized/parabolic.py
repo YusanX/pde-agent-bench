@@ -13,6 +13,12 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 from . import SpecializedMetricsComputer
+from .meta_reader import (
+    read_agent_meta,
+    get_time_stepping_params,
+    get_mesh_params,
+    compute_dof
+)
 
 
 class ParabolicMetricsComputer(SpecializedMetricsComputer):
@@ -41,28 +47,28 @@ class ParabolicMetricsComputer(SpecializedMetricsComputer):
         metrics = {}
         
         try:
-            # 1. Compute DOF and time steps
-            resolution = result.get('test_params', {}).get('resolution', 0)
-            degree = result.get('test_params', {}).get('degree', 1)
+            # 1. Read agent's parameter choices using helper
+            agent_meta = read_agent_meta(self.agent_output_dir)
+            mesh_params = get_mesh_params(agent_meta, result)
+            time_params = get_time_stepping_params(agent_meta, result, self.config['oracle_config'])
             
-            # DOF estimation (same as elliptic)
-            if degree == 1:
-                dof = resolution ** 2
-            elif degree == 2:
-                dof = (2 * resolution + 1) ** 2
-            else:
-                dof = resolution ** 2 * degree ** 2
+            resolution = mesh_params['resolution']
+            degree = mesh_params['degree']
+            dt = time_params['dt']
+            n_steps = time_params['n_steps']
+            t_end = time_params['t_end']
+            scheme = time_params['scheme']
             
-            # Time stepping parameters
-            oracle_time_config = self.config['oracle_config']['pde']['time']
-            t_end = oracle_time_config['t_end']
-            dt = result.get('test_params', {}).get('dt', oracle_time_config['dt'])
-            n_steps = int(np.ceil(t_end / dt))
+            # Compute DOF
+            dof = compute_dof(resolution, degree, dim=2)
             
             metrics['dof'] = int(dof)
             metrics['n_steps'] = n_steps
             metrics['dt'] = float(dt)
             metrics['t_end'] = float(t_end)
+            metrics['agent_resolution'] = resolution
+            metrics['agent_degree'] = degree
+            metrics['time_scheme'] = scheme
             
             # 2. Compute WorkRate
             runtime = result.get('runtime_sec', 0)
@@ -75,8 +81,16 @@ class ParabolicMetricsComputer(SpecializedMetricsComputer):
                 metrics['time_per_step'] = float(time_per_step)
             
             # 3. CFL number
-            h = 1.0 / resolution
-            kappa = oracle_time_config.get('kappa', 1.0)
+            h = 1.0 / resolution if resolution > 0 else 1.0
+            oracle_cfg = self.config.get('oracle_config', {})
+            coeffs = oracle_cfg.get('pde', {}).get('coefficients', {})
+            kappa_cfg = coeffs.get('kappa', {'value': 1.0})
+            if isinstance(kappa_cfg, dict):
+                kappa = kappa_cfg.get('value', 1.0)
+            else:
+                kappa = kappa_cfg
+            if not isinstance(kappa, (int, float)):
+                kappa = 1.0
             # For heat equation: CFL = κ * dt / h^2
             cfl = kappa * dt / (h ** 2)
             metrics['cfl_number'] = float(cfl)
@@ -136,4 +150,5 @@ class ParabolicMetricsComputer(SpecializedMetricsComputer):
             solver_info['read_error'] = f"Failed to read solver info: {str(e)}"
         
         return solver_info
+
 

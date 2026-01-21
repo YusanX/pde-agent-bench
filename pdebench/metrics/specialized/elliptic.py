@@ -42,6 +42,15 @@ class EllipticMetricsComputer(SpecializedMetricsComputer):
             resolution = result.get('test_params', {}).get('resolution', 0)
             degree = result.get('test_params', {}).get('degree', 1)
             
+            # Try to read from meta.json solver_info (preferred for autonomous mode)
+            meta_file = self.agent_output_dir / 'meta.json'
+            if meta_file.exists():
+                with open(meta_file) as f:
+                    meta = json.load(f)
+                solver_info = meta.get('solver_info', {})
+                resolution = solver_info.get('mesh_resolution', resolution)
+                degree = solver_info.get('element_degree', degree)
+            
             # 2D triangular mesh DOF estimation
             # P1: DOF ≈ N^2
             # P2: DOF ≈ (2N+1)^2 (includes edge midpoints)
@@ -54,8 +63,8 @@ class EllipticMetricsComputer(SpecializedMetricsComputer):
                 dof = resolution ** 2 * degree ** 2
             
             metrics['dof'] = int(dof)
-            metrics['resolution'] = int(resolution)
-            metrics['degree'] = int(degree)
+            metrics['resolution'] = int(resolution) if resolution else 0
+            metrics['degree'] = int(degree) if degree else 1
             
             # 2. Compute efficiency DOF/s
             runtime = result.get('runtime_sec', 0)
@@ -129,4 +138,7 @@ class EllipticMetricsComputer(SpecializedMetricsComputer):
             solver_info['read_error'] = f"Failed to read solver info: {str(e)}"
         
         return solver_info
+
+
+
 

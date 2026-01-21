@@ -95,14 +95,29 @@ class CaseRunner:
         
         # Execute agent script
         print(f"\n🤖 Executing agent script: {agent_script.name}")
-        print(f"   Parameters: {test_params}")
         
-        agent_result = execute_agent_script(
-            script_path=agent_script,
-            outdir=self.agent_output_dir,
-            timeout_sec=timeout_sec,
-            **test_params
-        )
+        # Check if autonomous mode is enabled (default: True)
+        eval_config = self.config.get('evaluation_config', {})
+        exec_mode = eval_config.get('execution_mode', 'autonomous')
+        
+        if exec_mode == 'autonomous':
+            print(f"   Mode: Autonomous (agent decides parameters)")
+            agent_result = execute_agent_script(
+                script_path=agent_script,
+                outdir=self.agent_output_dir,
+                timeout_sec=timeout_sec,
+                mode='autonomous'
+            )
+        else:  # guided mode (backward compatible)
+            print(f"   Mode: Guided (system provides parameters)")
+            print(f"   Parameters: {test_params}")
+            agent_result = execute_agent_script(
+                script_path=agent_script,
+                outdir=self.agent_output_dir,
+                timeout_sec=timeout_sec,
+                mode='guided',
+                **test_params
+            )
         
         if not agent_result.success:
             result = {

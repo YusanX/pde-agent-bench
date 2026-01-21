@@ -1,2 +1,0 @@
-"""PDE solvers for PDEBench."""
-

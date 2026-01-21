@@ -20,10 +20,16 @@ def check_tier_levels(
     """
     Check which tier levels an agent solution has passed.
     
-    Tier levels represent different quality grades:
-    - L1 (Low): 10x relaxed tolerance
-    - L2 (Medium): Oracle baseline tolerance
-    - L3 (High): 10x stricter tolerance
+    Two evaluation modes:
+    - fix_accuracy: Within time budget (medium), achieve different accuracy levels
+      * Level 1: Achieve level_1 accuracy (10x relaxed)
+      * Level 2: Achieve level_2 accuracy (Oracle baseline)
+      * Level 3: Achieve level_3 accuracy (100x stricter)
+    
+    - fix_time: Meet accuracy requirement (level_2), achieve different speeds
+      * Level 1: Within slow time budget (10x Oracle)
+      * Level 2: Within medium time budget (Oracle baseline)
+      * Level 3: Within fast time budget (0.1x Oracle)
     
     Args:
         mode: Evaluation mode ('fix_accuracy' or 'fix_time')
@@ -37,7 +43,7 @@ def check_tier_levels(
         - total: Total number of levels (always 3)
         - level_details: Dict mapping 'level_1', 'level_2', 'level_3' to bool
     
-    Example:
+    Example (fix_accuracy mode - check accuracy tiers):
         >>> tiers = {
         ...     'accuracy': {
         ...         'level_1': {'target_error': 1e-2},
@@ -45,11 +51,10 @@ def check_tier_levels(
         ...         'level_3': {'target_error': 1e-6}
         ...     },
         ...     'speed': {
-        ...         'fast': {'time_budget': 0.1},
-        ...         'medium': {'time_budget': 1.0},
-        ...         'slow': {'time_budget': 10.0}
+        ...         'medium': {'time_budget': 1.0}
         ...     }
         ... }
+        >>> # Runtime 0.5s < 1.0s budget, error 1e-5 passes L1,L2 but not L3
         >>> check_tier_levels('fix_accuracy', 0.5, 1e-5, tiers)
         {'passed': [1, 2], 'total': 3, 'level_details': {...}}
     """
@@ -63,25 +68,11 @@ def check_tier_levels(
     passed = []
     
     if mode == 'fix_accuracy':
-        # Speed tiers: check runtime against time budgets
-        # Must first meet accuracy requirement (level_2 is the baseline)
-        target_error = tiers['accuracy']['level_2']['target_error']
-        
-        if error <= target_error:
-            # Accuracy requirement met, check speed levels
-            if runtime <= tiers['speed']['fast']['time_budget']:
-                passed = [1, 2, 3]  # Fast: pass all levels
-            elif runtime <= tiers['speed']['medium']['time_budget']:
-                passed = [1, 2]  # Medium: pass L1, L2
-            elif runtime <= tiers['speed']['slow']['time_budget']:
-                passed = [1]  # Slow: pass only L1
-    
-    elif mode == 'fix_time':
         # Accuracy tiers: check error against accuracy targets
         # Must first meet time requirement (medium is the baseline)
         time_budget = tiers['speed']['medium']['time_budget']
         
-        if runtime <= time_budget:
+        if runtime <= time_budget * 1.2:
             # Time requirement met, check accuracy levels
             if error <= tiers['accuracy']['level_3']['target_error']:
                 passed = [1, 2, 3]  # High accuracy: pass all levels
@@ -89,6 +80,20 @@ def check_tier_levels(
                 passed = [1, 2]  # Medium accuracy: pass L1, L2
             elif error <= tiers['accuracy']['level_1']['target_error']:
                 passed = [1]  # Low accuracy: pass only L1
+    
+    elif mode == 'fix_time':
+        # Speed tiers: check runtime against time budgets
+        # Must first meet accuracy requirement (level_2 is the baseline)
+        target_error = tiers['accuracy']['level_2']['target_error']
+        
+        if error <= target_error * 1.2:
+            # Accuracy requirement met, check speed levels
+            if runtime <= tiers['speed']['fast']['time_budget']:
+                passed = [1, 2, 3]  # Fast: pass all levels
+            elif runtime <= tiers['speed']['medium']['time_budget']:
+                passed = [1, 2]  # Medium: pass L1, L2
+            elif runtime <= tiers['speed']['slow']['time_budget']:
+                passed = [1]  # Slow: pass only L1
     
     return {
         'passed': passed,
