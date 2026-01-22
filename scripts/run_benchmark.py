@@ -45,12 +45,52 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from pdebench.core.prompt_builder import generate_prompt
 from pdebench.core.llm_client import call_llm, LLMClient
+from pdebench.core.feedback_prompt import create_feedback_prompt  # 实验 2.1: 多轮迭代
 from pdebench.metrics.specialized import get_specialized_metrics_computer
+from pdebench.analysis import GateAnalyzer, ErrorClassifier  # 实验 4.1, 4.5
+from pdebench.agents import AgentRegistry, get_agent  # 实验 1.2: Code Agent
 
 
 # =============================================================================
 # 数据加载
 # =============================================================================
+
+def load_agent_config(agent_name: str) -> Dict:
+    """
+    加载 Agent 配置文件
+    
+    Args:
+        agent_name: Agent 名称（如 'swe-agent'）
+    
+    Returns:
+        配置字典，如果没有配置文件则返回默认配置
+    """
+    # 配置文件路径
+    config_file = Path(__file__).parent.parent / 'pdebench' / 'configs' / f'{agent_name}.json'
+    
+    if config_file.exists():
+        with open(config_file) as f:
+            config = json.load(f)
+            
+            # 处理环境变量替换
+            import os
+            import re
+            config_str = json.dumps(config)
+            # 替换 ${VAR_NAME} 格式的环境变量
+            for match in re.finditer(r'\$\{([^}]+)\}', config_str):
+                var_name = match.group(1)
+                var_value = os.environ.get(var_name, '')
+                config_str = config_str.replace(match.group(0), var_value)
+            config = json.loads(config_str)
+            
+            return config
+    
+    # 默认配置
+    return {
+        'timeout': 300,
+        'max_iterations': 30
+    }
+
 
 def load_benchmark_cases(
     data_file: Path,
@@ -230,7 +270,8 @@ def run_single_case(
     oracle_cache_dir: Path,
     solver_path_override: Optional[Path] = None,
     skip_generation: bool = False,
-    timeout: int = 300
+    timeout: int = 300,
+    max_attempts: int = 1  # 实验 2.1: 多轮迭代
 ) -> Dict:
     """运行单个case的完整流程"""
     
@@ -253,8 +294,12 @@ def run_single_case(
     prompt = generate_prompt(case, oracle_info)
     (case_output / "prompt.md").write_text(prompt)
     
-    # Step 3: 调用LLM或加载已有solver
+    # Step 3: 调用LLM/Agent或加载已有solver
     solver_path = case_output / "solver.py"
+    response = None  # 用于存储 LLM/Agent 响应
+    
+    # 检测是否为 Code Agent
+    is_code_agent = AgentRegistry.is_registered(agent_name)
     
     if solver_path_override is not None:
         if not solver_path_override.exists():
@@ -263,8 +308,52 @@ def run_single_case(
     elif skip_generation and solver_path.exists():
         print(f"   ⏭️  Using existing solver")
         solver_code = solver_path.read_text()
+    elif is_code_agent:
+        # ⭐ 使用 Code Agent（实验 1.2）
+        print(f"   🤖 Calling {agent_name} (Code Agent)...")
+        try:
+            # 加载 Agent 配置
+            agent_config = load_agent_config(agent_name)
+            
+            # 创建 Agent 实例
+            agent = get_agent(agent_name, config=agent_config)
+            
+            # 调用 Agent（使用相同的 prompt！）
+            response = agent.generate_solution(
+                prompt=prompt,
+                context={
+                    'case_id': case_id,
+                    'case_spec': case,
+                    'oracle_info': oracle_info
+                }
+            )
+            
+            if not response.success:
+                print(f"   ❌ Agent call failed: {response.error}")
+                agent.cleanup()
+                return _make_error_result(case_id, 'AGENT_ERROR', response.error)
+            
+            solver_code = response.code
+            (case_output / "agent_response.txt").write_text(response.raw_response)
+            
+            if response.usage:
+                tokens_in = response.usage.get('input_tokens', 0)
+                tokens_out = response.usage.get('output_tokens', 0)
+                if tokens_in > 0 or tokens_out > 0:
+                    print(f"   📊 Tokens: in={tokens_in}, out={tokens_out}")
+                print(f"   ⏱️  Latency: {response.usage.get('latency_sec', 0):.2f}s")
+            
+            # 清理 Agent 资源
+            agent.cleanup()
+            
+        except Exception as e:
+            print(f"   ❌ Agent call failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return _make_error_result(case_id, 'AGENT_ERROR', str(e))
     else:
-        print(f"   🤖 Calling {agent_name}...")
+        # ⭐ 使用纯 LLM（实验 1.1）
+        print(f"   🤖 Calling {agent_name} (LLM)...")
         try:
             response = call_llm(agent_name, prompt)
             
@@ -304,8 +393,13 @@ def run_single_case(
     legacy_tolerance = eval_cfg.get('tolerance', 1.2)
     accuracy_tolerance = eval_cfg.get('accuracy_tolerance', legacy_tolerance)
     time_tolerance = eval_cfg.get('time_tolerance', legacy_tolerance)
-    target_error = oracle_info['error'] * accuracy_tolerance
-    target_time = oracle_info['time'] * time_tolerance
+    
+    # 设置最小阈值，避免 baseline 值过小时要求不切实际的标准
+    MIN_ERROR_THRESHOLD = 1e-6  # 最小相对误差：0.0001%
+    MIN_TIME_THRESHOLD = 1.0    # 最小时间容差：1秒（考虑 Python/解释器开销）
+    
+    target_error = max(oracle_info['error'] * accuracy_tolerance, MIN_ERROR_THRESHOLD)
+    target_time = max(oracle_info['time'] * time_tolerance, MIN_TIME_THRESHOLD)
     
     if error > target_error:
         status = 'FAIL'
@@ -334,6 +428,32 @@ def run_single_case(
         'target_time': target_time,
         'fail_reason': fail_reason,
     }
+    
+    # 实验 4.1: Gate 分析
+    gate_analyzer = GateAnalyzer()
+    gate_breakdown = gate_analyzer.analyze_single_case(
+        case_id=case_id,
+        exec_result={'success': True, 'error': error, 'time': exec_result['time']},
+        eval_result={
+            'target_error': target_error,
+            'target_time': target_time,
+            'fail_reason': fail_reason,
+            'status': status
+        },
+        oracle_info=oracle_info
+    )
+    result['gate_breakdown'] = {
+        'exec_valid': gate_breakdown.exec_valid,
+        'accuracy_pass': gate_breakdown.accuracy_pass,
+        'time_pass': gate_breakdown.time_pass,
+        'final_pass': gate_breakdown.final_pass,
+        'failure_stage': gate_breakdown.failure_stage,
+        'failure_reason': gate_breakdown.failure_reason
+    }
+    
+    # 实验 4.6: 保存 LLM 使用信息（如果有）
+    if 'response' in locals() and hasattr(response, 'usage') and response.usage:
+        result['llm_usage'] = response.usage
     
     # 计算各math_type子榜指标
     math_types = case.get('pde_classification', {}).get('math_type', [])
@@ -370,6 +490,17 @@ def _make_error_result(case_id: str, status: str, error_msg: str, stderr: str = 
     }
     if stderr:
         result['stderr'] = stderr
+    
+    # 实验 4.1: 执行失败的 gate 分析
+    result['gate_breakdown'] = {
+        'exec_valid': False,
+        'accuracy_pass': False,
+        'time_pass': False,
+        'final_pass': False,
+        'failure_stage': 'exec',
+        'failure_reason': error_msg[:200] if error_msg else 'Unknown'
+    }
+    
     return result
 
 
@@ -399,7 +530,8 @@ def run_benchmark(
     equation_types: Optional[List[str]] = None,
     solver_path: Optional[Path] = None,
     skip_generation: bool = False,
-    timeout: int = 300
+    timeout: int = 300,
+    max_attempts: int = 1  # 实验 2.1
 ):
     """运行完整benchmark"""
     
@@ -412,12 +544,20 @@ def run_benchmark(
     print(f"⏱️  Timeout: {timeout}s")
     print("="*80)
     
-    # 验证agents
+    # 验证agents（支持 LLM 和 Code Agent）
     for agent in agents:
-        if agent not in LLMClient.SUPPORTED_AGENTS:
+        is_llm = agent in LLMClient.SUPPORTED_AGENTS
+        is_code_agent = AgentRegistry.is_registered(agent)
+        
+        if not is_llm and not is_code_agent:
             print(f"❌ Unknown agent: {agent}")
-            print(f"   Supported: {list(LLMClient.SUPPORTED_AGENTS.keys())}")
+            print(f"   Supported LLMs: {list(LLMClient.SUPPORTED_AGENTS.keys())}")
+            print(f"   Supported Code Agents: {AgentRegistry.list_agents()}")
             sys.exit(1)
+        
+        # 打印 agent 类型
+        agent_type = "Code Agent" if is_code_agent else "LLM"
+        print(f"   ✓ {agent}: {agent_type}")
     
     # 加载cases
     cases = load_benchmark_cases(data_file, case_filter, equation_types)
@@ -447,7 +587,8 @@ def run_benchmark(
                 oracle_cache_dir=oracle_cache_dir,
                 solver_path_override=solver_path,
                 skip_generation=skip_generation,
-                timeout=timeout
+                timeout=timeout,
+                max_attempts=max_attempts
             )
             agent_results.append(result)
         
@@ -514,6 +655,42 @@ def compute_summary(agent_name: str, results: List[Dict]) -> Dict:
         info.pop('metric_sums', None)
         info.pop('metric_counts', None)
     
+    # 实验 4.1: Gate Breakdown 统计
+    gate_analyzer = GateAnalyzer()
+    gate_breakdowns = []
+    for r in results:
+        if 'gate_breakdown' in r:
+            from pdebench.analysis.gate_analyzer import GateBreakdown
+            gb = GateBreakdown(
+                case_id=r['case_id'],
+                exec_valid=r['gate_breakdown']['exec_valid'],
+                accuracy_pass=r['gate_breakdown']['accuracy_pass'],
+                time_pass=r['gate_breakdown']['time_pass'],
+                final_pass=r['gate_breakdown']['final_pass'],
+                failure_stage=r['gate_breakdown'].get('failure_stage'),
+                failure_reason=r['gate_breakdown'].get('failure_reason')
+            )
+            gate_breakdowns.append(gb)
+    
+    gate_statistics = gate_analyzer.compute_aggregate_statistics(gate_breakdowns)
+    
+    # 实验 4.6: 成本效益分析
+    llm_usages = [r.get('llm_usage', {}) for r in results if 'llm_usage' in r]
+    cost_analysis = {}
+    if llm_usages:
+        total_cost = sum(u.get('cost_usd', 0) for u in llm_usages)
+        total_tokens = sum(u.get('total_tokens', 0) for u in llm_usages)
+        avg_latency = np.mean([u.get('latency_sec', 0) for u in llm_usages if 'latency_sec' in u])
+        
+        cost_analysis = {
+            'total_cost_usd': float(total_cost),
+            'total_tokens': int(total_tokens),
+            'avg_latency_sec': float(avg_latency),
+            'cost_per_case': float(total_cost / len(llm_usages)) if llm_usages else 0,
+            'cost_per_pass': float(total_cost / passed) if passed > 0 else None,
+            'tokens_per_case': int(total_tokens / len(llm_usages)) if llm_usages else 0,
+        }
+    
     return {
         'agent_name': agent_name,
         'timestamp': datetime.now().isoformat(),
@@ -523,22 +700,84 @@ def compute_summary(agent_name: str, results: List[Dict]) -> Dict:
         'avg_error': float(np.mean(errors)) if errors else None,
         'avg_time': float(np.mean(times)) if times else None,
         'math_type_summary': math_type_summary,
+        'gate_statistics': gate_statistics,  # 实验 4.1
+        'cost_analysis': cost_analysis,      # 实验 4.6
         'results': results
     }
 
 
 def print_summary(summary: Dict):
     """打印汇总信息"""
-    print(f"\n{'─'*60}")
+    print(f"\n{'─'*80}")
     print(f"📊 Summary: {summary['agent_name']}")
-    print(f"{'─'*60}")
+    print(f"{'─'*80}")
     print(f"Total Cases: {summary['total_cases']}")
     print(f"Passed: {summary['passed_cases']} ({summary['pass_rate']:.1%})")
     if summary['avg_error'] is not None:
         print(f"Avg Error: {summary['avg_error']:.2e}")
     if summary['avg_time'] is not None:
         print(f"Avg Time: {summary['avg_time']:.3f}s")
-    print(f"{'─'*60}")
+    
+    # Math Type 子榜统计
+    if 'math_type_summary' in summary and summary['math_type_summary']:
+        print(f"\n{'─'*80}")
+        print(f"📐 Math Type Sub-Leaderboards")
+        print(f"{'─'*80}")
+        for math_type, stats in sorted(summary['math_type_summary'].items()):
+            print(f"\n  {math_type.upper()}:")
+            print(f"    Cases: {stats['cases']}")
+            print(f"    Pass Rate: {stats['passed']}/{stats['cases']} ({stats['pass_rate']:.1%})")
+            
+            if 'avg_metrics' in stats and stats['avg_metrics']:
+                print(f"    Avg Metrics:")
+                for metric_name, value in sorted(stats['avg_metrics'].items()):
+                    if isinstance(value, float):
+                        # 根据指标名称选择合适的格式
+                        if 'rate' in metric_name or 'ratio' in metric_name:
+                            print(f"      - {metric_name}: {value:.3f}")
+                        elif 'time' in metric_name or 'latency' in metric_name:
+                            print(f"      - {metric_name}: {value:.3f}s")
+                        elif 'dof' in metric_name or 'iterations' in metric_name:
+                            print(f"      - {metric_name}: {value:,.0f}")
+                        elif 'error' in metric_name or 'residual' in metric_name:
+                            print(f"      - {metric_name}: {value:.2e}")
+                        else:
+                            print(f"      - {metric_name}: {value:.3f}")
+                    else:
+                        print(f"      - {metric_name}: {value}")
+    
+    # 实验 4.1: Gate Breakdown
+    if 'gate_statistics' in summary:
+        gate_stats = summary['gate_statistics']
+        print(f"\n{'─'*80}")
+        print(f"🚪 Gate Breakdown (实验 4.1)")
+        print(f"{'─'*80}")
+        print(f"  Exec Valid:     {gate_stats['exec_valid_count']:3d}/{gate_stats['total_cases']} ({gate_stats['exec_valid_rate']:.1%})")
+        print(f"  Accuracy Pass:  {gate_stats['accuracy_pass_count']:3d}/{gate_stats['total_cases']} ({gate_stats['accuracy_pass_rate']:.1%})")
+        print(f"  Time Pass:      {gate_stats['time_pass_count']:3d}/{gate_stats['total_cases']} ({gate_stats['time_pass_rate']:.1%})")
+        print(f"  Final Pass:     {gate_stats['final_pass_count']:3d}/{gate_stats['total_cases']} ({gate_stats['final_pass_rate']:.1%})")
+        
+        if gate_stats.get('failure_breakdown'):
+            print(f"\n  Failure Distribution:")
+            for stage, count in sorted(gate_stats['failure_breakdown'].items()):
+                pct = gate_stats['failure_breakdown_pct'][stage]
+                print(f"    - {stage}: {count} ({pct:.1%})")
+    
+    # 实验 4.6: 成本效益分析
+    if 'cost_analysis' in summary and summary['cost_analysis']:
+        cost = summary['cost_analysis']
+        print(f"\n{'─'*80}")
+        print(f"💰 Cost Analysis (实验 4.6)")
+        print(f"{'─'*80}")
+        print(f"  Total Cost:     ${cost['total_cost_usd']:.4f}")
+        print(f"  Total Tokens:   {cost['total_tokens']:,}")
+        print(f"  Avg Latency:    {cost['avg_latency_sec']:.2f}s")
+        print(f"  Cost/Case:      ${cost['cost_per_case']:.4f}")
+        if cost.get('cost_per_pass') is not None:
+            print(f"  Cost/Pass:      ${cost['cost_per_pass']:.4f}")
+        print(f"  Tokens/Case:    {cost['tokens_per_case']:,}")
+    
+    print(f"{'─'*80}")
 
 
 # =============================================================================
@@ -607,6 +846,13 @@ def main():
         help='Timeout per case in seconds (default: 300)'
     )
     
+    parser.add_argument(
+        '--max-attempts',
+        type=int,
+        default=1,
+        help='Maximum attempts per case for multi-attempt mode (default: 1, use 3 for Experiment 2.1)'
+    )
+    
     args = parser.parse_args()
     
     # 切换到项目根目录
@@ -626,7 +872,8 @@ def main():
         equation_types=args.equation_types,
         solver_path=args.solver_path,
         skip_generation=args.skip_generation,
-        timeout=args.timeout
+        timeout=args.timeout,
+        max_attempts=args.max_attempts
     )
 
 

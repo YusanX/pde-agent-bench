@@ -6,8 +6,9 @@ import os
 import re
 import json
 import logging
+import time
 from typing import Optional, Dict, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,7 @@ class LLMResponse:
     raw_response: str
     model: str
     error: Optional[str] = None
-    usage: Optional[Dict[str, int]] = None
+    usage: Optional[Dict[str, Any]] = field(default_factory=dict)  # 包含 tokens、cost、latency
 
 
 def extract_code(response: str) -> str:
@@ -50,11 +51,34 @@ class LLMClient:
         'gpt-4o': {'provider': 'openai', 'model': 'gpt-4o'},
         'gpt-4o-mini': {'provider': 'openai', 'model': 'gpt-4o-mini'},
         'gpt-5.1': {'provider': 'openai', 'model': 'gpt-5.1'},
+        'gpt-5.2': {'provider': 'openai', 'model': 'gpt-5.2'},  # 实验 1.1 新增
         'o3-mini': {'provider': 'openai', 'model': 'o3-mini'},
         'sonnet-3.5': {'provider': 'anthropic', 'model': 'anthropic.claude-3-5-sonnet-20241022-v2:0'},
         'sonnet-3.6': {'provider': 'anthropic', 'model': 'anthropic.claude-sonnet-4-20250514-v1:0'},
+        'claude-opus-4.5': {'provider': 'anthropic', 'model': 'anthropic.claude-opus-4-20250514-v1:0'},  # 实验 1.1 新增
         'haiku': {'provider': 'anthropic', 'model': 'anthropic.claude-3-haiku-20240307-v1:0'},
         'gemini': {'provider': 'google', 'model': 'gemini-3.0-pro'},
+        'gemini-3.0-pro': {'provider': 'google', 'model': 'gemini-3.0-pro'},  # 实验 1.1 别名
+    }
+    
+    # 定价信息（USD per 1M tokens）- 实验 4.6 成本追踪
+    PRICING = {
+        # OpenAI
+        'gpt-4o': {'input': 2.50, 'output': 10.00},
+        'gpt-4o-mini': {'input': 0.15, 'output': 0.60},
+        'gpt-5.1': {'input': 5.00, 'output': 15.00},  # 估算
+        'gpt-5.2': {'input': 5.00, 'output': 15.00},  # 估算
+        'o3-mini': {'input': 1.10, 'output': 4.40},
+        
+        # Anthropic
+        'sonnet-3.5': {'input': 3.00, 'output': 15.00},
+        'sonnet-3.6': {'input': 3.00, 'output': 15.00},
+        'claude-opus-4.5': {'input': 15.00, 'output': 75.00},  # 估算
+        'haiku': {'input': 0.25, 'output': 1.25},
+        
+        # Google
+        'gemini': {'input': 0.075, 'output': 0.30},
+        'gemini-3.0-pro': {'input': 0.075, 'output': 0.30},
     }
     
     def __init__(self, agent_name: str, temperature: float = 0.0):
@@ -76,6 +100,24 @@ class LLMClient:
         
         # 初始化客户端
         self._init_client()
+    
+    def _calculate_cost(self, input_tokens: int, output_tokens: int) -> float:
+        """
+        计算API调用成本（实验 4.6）
+        
+        Args:
+            input_tokens: 输入token数
+            output_tokens: 输出token数
+        
+        Returns:
+            成本（USD）
+        """
+        pricing = self.PRICING.get(self.agent_name, {'input': 0, 'output': 0})
+        cost = (
+            input_tokens / 1_000_000 * pricing['input'] +
+            output_tokens / 1_000_000 * pricing['output']
+        )
+        return cost
     
     def _init_client(self):
         """初始化API客户端"""
@@ -141,19 +183,35 @@ class LLMClient:
         
         # o3-mini不支持temperature
         kwargs = {"model": self.model, "messages": messages}
-        if self.agent_name != 'o3-mini':
+        if self.agent_name not in ['o3-mini', 'gpt-5.1', 'gpt-5.2']:
             kwargs["temperature"] = self.temperature
         
+        # 记录开始时间（实验 4.6）
+        start_time = time.time()
+        
         response = self.client.chat.completions.create(**kwargs)
+        
+        # 计算延迟（实验 4.6）
+        latency = time.time() - start_time
         
         raw_response = response.choices[0].message.content.strip()
         code = extract_code(raw_response)
         
-        usage = None
+        usage = {}
         if response.usage:
+            input_tokens = response.usage.prompt_tokens
+            output_tokens = response.usage.completion_tokens
+            total_tokens = response.usage.total_tokens
+            
+            # 计算成本（实验 4.6）
+            cost = self._calculate_cost(input_tokens, output_tokens)
+            
             usage = {
-                'input_tokens': response.usage.prompt_tokens,
-                'output_tokens': response.usage.completion_tokens
+                'input_tokens': input_tokens,
+                'output_tokens': output_tokens,
+                'total_tokens': total_tokens,
+                'latency_sec': latency,
+                'cost_usd': cost
             }
         
         return LLMResponse(
@@ -177,6 +235,9 @@ class LLMClient:
             "messages": messages
         }
         
+        # 记录开始时间（实验 4.6）
+        start_time = time.time()
+        
         response = self.client.invoke_model(
             modelId=self.model,
             body=json.dumps(request_body),
@@ -184,15 +245,28 @@ class LLMClient:
             accept="application/json"
         )
         
+        # 计算延迟（实验 4.6）
+        latency = time.time() - start_time
+        
         response_body = json.loads(response["body"].read().decode("utf-8"))
         raw_response = response_body["content"][0]["text"]
         code = extract_code(raw_response)
         
-        usage = None
+        usage = {}
         if 'usage' in response_body:
+            input_tokens = response_body['usage'].get('input_tokens', 0)
+            output_tokens = response_body['usage'].get('output_tokens', 0)
+            total_tokens = input_tokens + output_tokens
+            
+            # 计算成本（实验 4.6）
+            cost = self._calculate_cost(input_tokens, output_tokens)
+            
             usage = {
-                'input_tokens': response_body['usage'].get('input_tokens', 0),
-                'output_tokens': response_body['usage'].get('output_tokens', 0)
+                'input_tokens': input_tokens,
+                'output_tokens': output_tokens,
+                'total_tokens': total_tokens,
+                'latency_sec': latency,
+                'cost_usd': cost
             }
         
         return LLMResponse(
@@ -207,6 +281,9 @@ class LLMClient:
         """调用Google Gemini"""
         from google.genai import types
         
+        # 记录开始时间（实验 4.6）
+        start_time = time.time()
+        
         response = self.client.models.generate_content(
             model=self.model,
             contents=prompt,
@@ -216,14 +293,27 @@ class LLMClient:
             )
         )
         
+        # 计算延迟（实验 4.6）
+        latency = time.time() - start_time
+        
         raw_response = response.text
         code = extract_code(raw_response)
         
-        usage = None
+        usage = {}
         if response.usage_metadata:
+            input_tokens = response.usage_metadata.prompt_token_count
+            output_tokens = response.usage_metadata.candidates_token_count
+            total_tokens = response.usage_metadata.total_token_count
+            
+            # 计算成本（实验 4.6）
+            cost = self._calculate_cost(input_tokens, output_tokens)
+            
             usage = {
-                'input_tokens': response.usage_metadata.prompt_token_count,
-                'output_tokens': response.usage_metadata.candidates_token_count
+                'input_tokens': input_tokens,
+                'output_tokens': output_tokens,
+                'total_tokens': total_tokens,
+                'latency_sec': latency,
+                'cost_usd': cost
             }
         
         return LLMResponse(

@@ -61,14 +61,19 @@ class ConvectionDiffusionSolver:
         a = (epsilon * ufl.inner(ufl.grad(u), ufl.grad(v)) + ufl.dot(beta_vec, ufl.grad(u)) * v) * ufl.dx
         L = (f_expr if f_expr is not None else 0.0) * v * ufl.dx
 
-        stabilization = params.get("stabilization", None)
+        solver_params = case_spec.get("oracle_solver", {})
+        stabilization = solver_params.get("stabilization", params.get("stabilization", None))
+        upwind_parameter = float(solver_params.get("upwind_parameter", 1.0))
         if stabilization == "supg":
             h = ufl.CellDiameter(msh)
             beta_norm = ufl.sqrt(ufl.dot(beta_vec, beta_vec))
-            tau = h / (2.0 * beta_norm + 1e-12)
-            r = -epsilon * ufl.div(ufl.grad(u)) + ufl.dot(beta_vec, ufl.grad(u)) - (f_expr if f_expr is not None else 0.0)
-            a += tau * ufl.dot(beta_vec, ufl.grad(v)) * r * ufl.dx
-            L += tau * ufl.dot(beta_vec, ufl.grad(v)) * (f_expr if f_expr is not None else 0.0) * ufl.dx
+            tau = upwind_parameter * h / (2.0 * beta_norm + 1e-12)
+            # SUPG stabilization: add streamline diffusion term to both bilinear and linear forms
+            # Bilinear form: add tau * (beta·grad(v)) * (beta·grad(u) - epsilon*div(grad(u)))
+            a += tau * ufl.dot(beta_vec, ufl.grad(v)) * (ufl.dot(beta_vec, ufl.grad(u)) - epsilon * ufl.div(ufl.grad(u))) * ufl.dx
+            # Linear form: add tau * (beta·grad(v)) * f (only if f exists)
+            if f_expr is not None:
+                L += tau * ufl.dot(beta_vec, ufl.grad(v)) * f_expr * ufl.dx
 
         bcs = []
         if u_exact is not None:
@@ -79,7 +84,6 @@ class ConvectionDiffusionSolver:
             bc_value = bc_cfg.get("value", "0.0")
             bcs = [build_dirichlet_bc(msh, V, bc_value)]
 
-        solver_params = case_spec.get("oracle_solver", {})
         petsc_options = {
             "ksp_type": solver_params.get("ksp_type", "gmres"),
             "pc_type": solver_params.get("pc_type", "ilu"),
@@ -109,6 +113,7 @@ class ConvectionDiffusionSolver:
             "pc_type": petsc_options["pc_type"],
             "rtol": petsc_options["ksp_rtol"],
             "stabilization": stabilization or "none",
+            "upwind_parameter": upwind_parameter,
         }
         if u_exact is not None:
             _, _, u_exact_grid = sample_scalar_on_grid(

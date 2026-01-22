@@ -64,10 +64,18 @@ def create_vector_space(
 def create_mixed_space(
     msh: mesh.Mesh, degree_u: int, degree_p: int
 ) -> fem.FunctionSpace:
-    vel_el = ufl.VectorElement("Lagrange", msh.ufl_cell(), degree_u)
-    pres_el = ufl.FiniteElement("Lagrange", msh.ufl_cell(), degree_p)
-    mixed_el = ufl.MixedElement([vel_el, pres_el])
-    return fem.FunctionSpace(msh, mixed_el)
+    from basix.ufl import element as basix_element
+    from basix.ufl import mixed_element as basix_mixed_element
+
+    vel_el = basix_element(
+        "Lagrange",
+        msh.topology.cell_name(),
+        degree_u,
+        shape=(msh.geometry.dim,),
+    )
+    pres_el = basix_element("Lagrange", msh.topology.cell_name(), degree_p)
+    mixed_el = basix_mixed_element([vel_el, pres_el])
+    return fem.functionspace(msh, mixed_el)
 
 
 def locate_all_boundary_dofs(
@@ -176,9 +184,13 @@ def parse_vector_expression(
 
 
 def interpolate_expression(func: fem.Function, expr: ufl.core.expr.Expr) -> None:
-    interp_points = func.function_space.element.interpolation_points
-    expr_compiled = fem.Expression(expr, interp_points)
-    func.interpolate(expr_compiled)
+    # Handle scalar constants (float/int) that can't be used directly in fem.Expression
+    if isinstance(expr, (int, float)):
+        func.interpolate(lambda x: x[0] * 0.0 + expr)
+    else:
+        interp_points = func.function_space.element.interpolation_points
+        expr_compiled = fem.Expression(expr, interp_points)
+        func.interpolate(expr_compiled)
 
 
 def create_kappa_field(

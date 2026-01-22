@@ -9,7 +9,6 @@ import sympy as sp
 import ufl
 from dolfinx import fem
 from dolfinx.fem.petsc import NonlinearProblem
-from dolfinx.nls.petsc import NewtonSolver
 from mpi4py import MPI
 from petsc4py import PETSc
 
@@ -65,7 +64,8 @@ class NavierStokesIncompressibleSolver:
             u_exact_expr = parse_vector_expression(u_sym, x)
             p_exact_expr = parse_expression(p_sym, x)
 
-            V, Q = W.sub(0).collapse(), W.sub(1).collapse()
+            V, _ = W.sub(0).collapse()
+            Q, _ = W.sub(1).collapse()
             u_exact = fem.Function(V)
             p_exact = fem.Function(Q)
             interpolate_expression(u_exact, u_exact_expr)
@@ -86,12 +86,12 @@ class NavierStokesIncompressibleSolver:
 
         bcs = []
         if u_exact is not None:
-            V = W.sub(0).collapse()
+            V, _ = W.sub(0).collapse()
             boundary_dofs = fem.locate_dofs_geometrical(
                 (W.sub(0), V), lambda x: (x[0] >= 0)
             )
             bcs = [fem.dirichletbc(u_exact, boundary_dofs, W.sub(0))]
-        Q = W.sub(1).collapse()
+        Q, _ = W.sub(1).collapse()
         p_dofs = fem.locate_dofs_geometrical(
             (W.sub(1), Q),
             lambda x: np.isclose(x[0], 0.0) & np.isclose(x[1], 0.0),
@@ -101,22 +101,38 @@ class NavierStokesIncompressibleSolver:
             p0.x.array[:] = 0.0
             bcs.append(fem.dirichletbc(p0, p_dofs, W.sub(1)))
 
-        problem = NonlinearProblem(F, w, bcs=bcs)
-        solver = NewtonSolver(MPI.COMM_WORLD, problem)
-        solver.rtol = case_spec.get("oracle_solver", {}).get("rtol", 1e-10)
-        solver.atol = case_spec.get("oracle_solver", {}).get("atol", 1e-12)
-        solver.max_it = case_spec.get("oracle_solver", {}).get("max_it", 30)
+        problem = NonlinearProblem(F, w, bcs=bcs, petsc_options_prefix="oracle_ns_")
+        solver_params = case_spec.get("oracle_solver", {})
+        # Support both generic keys (rtol/atol/max_it) and explicit Newton keys
+        # (newton_rtol/newton_atol/newton_max_it) for clarity.
+        rtol = solver_params.get("newton_rtol", solver_params.get("rtol", 1e-10))
+        atol = solver_params.get("newton_atol", solver_params.get("atol", 1e-12))
+        max_it = solver_params.get("newton_max_it", solver_params.get("max_it", 30))
+        
+        # Configure PETSc SNES solver (DOLFINx 0.10.0 API)
+        problem.solver.setTolerances(rtol=rtol, atol=atol, max_it=max_it)
 
+        # For manufactured solutions, use exact solution as initial guess.
+        # This ensures convergence and returns exact solution as reference (baseline_error=0).
+        # Note: baseline_error=0 here is correct - it means the Oracle configuration can
+        # represent the exact solution. Agents will use coarser meshes/lower orders and
+        # get non-zero errors when compared to this high-quality reference.
         if u_exact is not None:
             w0 = fem.Function(W)
             w0.sub(0).interpolate(u_exact)
             w.x.array[:] = w0.x.array
 
         t_start = time.perf_counter()
-        solver.solve(w)
+        problem.solver.solve(None, w.x.petsc_vec)
         baseline_time = time.perf_counter() - t_start
 
-        u_h, p_h = w.sub(0).collapse(), w.sub(1).collapse()
+        u_h = w.sub(0).collapse()
+        p_h = w.sub(1).collapse()
+
+        grid_cfg = case_spec["output"]["grid"]
+        _, _, u_grid = sample_vector_magnitude_on_grid(
+            u_h, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
+        )
 
         baseline_error = 0.0
         if u_exact is not None:
@@ -127,15 +143,10 @@ class NavierStokesIncompressibleSolver:
             # Use exact grid as reference for evaluation alignment.
             u_grid = u_exact_grid
 
-        grid_cfg = case_spec["output"]["grid"]
-        _, _, u_grid = sample_vector_magnitude_on_grid(
-            u_h, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-        )
-
         solver_info = {
-            "newton_rtol": solver.rtol,
-            "newton_atol": solver.atol,
-            "newton_max_it": solver.max_it,
+            "newton_rtol": rtol,
+            "newton_atol": atol,
+            "newton_max_it": max_it,
         }
 
         return OracleResult(

@@ -70,7 +70,8 @@ class HeatSolver:
             u_exact_expr = u_sym
             f_expr = f_sym
         elif source_expr is not None:
-            f_expr = sp.sympify(source_expr, locals={"x": sp.symbols("x"), "y": sp.symbols("y")})
+            sx, sy = sp.symbols("x y", real=True)
+            f_expr = sp.sympify(source_expr, locals={"x": sx, "y": sy, "pi": sp.pi})
 
         u_prev = fem.Function(V)
         if u_exact_expr is not None:
