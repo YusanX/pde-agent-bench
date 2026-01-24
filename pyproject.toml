@@ -17,6 +17,10 @@ dependencies = [
     "openai>=2.13",
     "boto3>=1.42",
     "google-genai>=1.59",
+    "fenics-dolfinx>=0.10.0",
+    "fenics-ufl>=2025.2.0",
+    "mpi4py>=4.1.1",
+    "petsc4py>=3.24.2",
 ]
 
 [project.optional-dependencies]
