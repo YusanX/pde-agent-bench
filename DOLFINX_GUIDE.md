@@ -259,3 +259,156 @@ Fix: use `colliding_cells.links(i)` and build `points_on_proc/cells_on_proc` map
     *   Bad: missing `petsc_options_prefix` argument
     *   Good: pass `petsc_options_prefix="your_prefix_"` to avoid runtime error
 
+
+
+## 10. Nonlinear PDE Quick Guide (e.g., Steady Incompressible Navier–Stokes)
+
+This section complements the linear examples above with a practical template for **nonlinear PDEs** in `dolfinx 0.10.0`, especially steady **Navier–Stokes** (NS), where you typically solve a nonlinear system using **Newton** or **Picard (fixed-point)** iterations.
+
+### 10.1 Mixed Function Spaces (Taylor–Hood) and Unknown Splitting
+
+For 2D steady incompressible NS on Ω:
+\[
+-\nu \Delta u + (u\cdot\nabla)u + \nabla p = f,\quad \nabla\cdot u = 0
+\]
+
+Use a stable mixed pair (e.g., Taylor–Hood \(P2/P1\)):
+
+```python
+from mpi4py import MPI
+from dolfinx import mesh, fem
+import ufl
+
+msh = mesh.create_unit_square(MPI.COMM_WORLD, 48, 48, cell_type=mesh.CellType.triangle)
+
+V = fem.functionspace(msh, ("Lagrange", 2, (msh.geometry.dim,)))  # velocity
+Q = fem.functionspace(msh, ("Lagrange", 1))                      # pressure
+W = V * Q
+
+w = fem.Function(W)          # current iterate/unknown
+(u, p) = ufl.split(w)
+(v, q) = ufl.TestFunctions(W)
+```
+
+### 10.2 Weak Form (Residual) for Newton
+
+Define the nonlinear residual \(F(w; v,q)=0\). A common steady NS residual is:
+
+```python
+nu = 0.1
+x = ufl.SpatialCoordinate(msh)
+f = ufl.as_vector((0.0, 0.0))  # body force
+
+def eps(u):
+    return ufl.sym(ufl.grad(u))
+
+def sigma(u, p):
+    return 2.0 * nu * eps(u) - p * ufl.Identity(msh.geometry.dim)
+
+F = (
+    ufl.inner(sigma(u, p), eps(v)) * ufl.dx
+    + ufl.inner(ufl.grad(u) * u, v) * ufl.dx      # (u·∇)u, written as grad(u)*u
+    - ufl.inner(f, v) * ufl.dx
+    + ufl.inner(ufl.div(u), q) * ufl.dx
+)
+```
+
+Notes:
+- For the convection term, `ufl.grad(u) * u` is the standard compact form (matrix-vector product).
+- You can swap in alternative forms (skew-symmetric, rotational) for stability; keep it consistent with your discretization goals.
+
+### 10.3 Dirichlet BCs and Initial Guess (Critical)
+
+Nonlinear solves are sensitive to BCs and initial guess.
+
+```python
+# Example: no-slip everywhere (replace with your problem’s BCs)
+import numpy as np
+u0 = fem.Function(V)
+u0.interpolate(lambda X: np.zeros((msh.geometry.dim, X.shape[1])))
+
+fdim = msh.topology.dim - 1
+facets = mesh.locate_entities_boundary(msh, fdim, lambda X: np.ones(X.shape[1], dtype=bool))
+dofs_u = fem.locate_dofs_topological((W.sub(0), V), fdim, facets)
+bc_u = fem.dirichletbc(u0, dofs_u, W.sub(0))
+bcs = [bc_u]
+
+# Initial guess: Stokes solve or u=0 often works for easy cases; harder flows need better guesses
+w.x.array[:] = 0.0
+```
+
+Best practice:
+- **Start from Stokes** (drop convection) to initialize `w`, then switch on convection and run Newton.
+- Or do continuation in viscosity / Reynolds number.
+
+### 10.4 Newton Solve with dolfinx.nls.petsc.NewtonSolver
+
+In dolfinx 0.10.0, use `petsc.NonlinearProblem` + `nls.petsc.NewtonSolver`:
+
+```python
+import numpy as np
+from dolfinx import nls
+from dolfinx.fem import petsc
+from petsc4py import PETSc
+
+problem = petsc.NonlinearProblem(F, w, bcs=bcs)
+solver = nls.petsc.NewtonSolver(msh.comm, problem)
+
+# Convergence/robustness knobs
+solver.convergence_criterion = "incremental"  # or "residual"
+solver.rtol = 1e-8
+solver.atol = 1e-10
+solver.max_it = 30
+
+# Configure the linear solver used inside each Newton step (Jacobian solve)
+ksp = solver.krylov_solver
+ksp.setType(PETSc.KSP.Type.GMRES)
+pc = ksp.getPC()
+pc.setType(PETSc.PC.Type.ILU)          # for small/medium problems
+# pc.setType(PETSc.PC.Type.LU)         # robust direct solve (often slower/memory-heavy)
+
+n, converged = solver.solve(w)
+assert converged
+w.x.scatter_forward()
+```
+
+Common “it diverges” fixes:
+- Use a better initial guess (Stokes → NS).
+- Reduce nonlinearity with continuation (increase Reynolds gradually / decrease `nu` gradually).
+- Use damping: try `solver.relaxation_parameter = 0.5` (or smaller) to stabilize Newton steps.
+- Switch preconditioner (ILU ↔ Hypre ↔ LU) and adjust tolerances.
+
+### 10.5 Picard (Fixed-Point) Iteration (Often More Robust Than Newton)
+
+Picard linearizes convection by freezing the advecting velocity \(u_k\):
+\[
+(u_k\cdot\nabla)u_{k+1}
+\]
+
+Implementation pattern:
+- Keep a `fem.Function` for `u_k`.
+- Build a *linear* form with `u_k` inserted into convection term.
+- Solve with `petsc.LinearProblem` inside an outer loop until \(\|u_{k+1}-u_k\|\) is small.
+
+This is slower than Newton but frequently stabilizes hard cases; you can use Picard to “get close”, then switch to Newton.
+
+### 10.6 Pressure Nullspace / Uniqueness (Important for Incompressible Flow)
+
+For pure Dirichlet velocity BCs, pressure is determined only up to a constant. Symptoms:
+- KSP stagnation or warnings about singular matrices.
+
+Typical fixes:
+- Impose a pressure gauge (e.g., set mean pressure to 0) or pin one DOF of `p`.
+- Or provide a PETSc nullspace for the mixed operator (advanced).
+
+Minimal practical approach (gauge):
+- Add constraint “mean(p)=0” (requires extra handling), or
+- Pin pressure at a point / on a boundary if it’s physically meaningful.
+
+### 10.7 Debug Checklist for Nonlinear PDEs
+
+- **BC sanity**: Are your Dirichlet BCs over/under-constraining the system?
+- **Scaling**: Very small/large `nu`, forcing amplitude, or domain scaling can destroy conditioning.
+- **Mesh/degree**: For NS, prefer stable mixed pairs; avoid equal-order \(P1/P1\) without stabilization.
+- **Residual form**: Make sure the convection term is written consistently (and is not accidentally zero).
+- **Solver logs**: Turn on PETSc logging to see what actually fails (KSP vs Newton vs assembly).

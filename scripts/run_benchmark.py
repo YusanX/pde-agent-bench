@@ -394,12 +394,11 @@ def run_single_case(
     accuracy_tolerance = eval_cfg.get('accuracy_tolerance', legacy_tolerance)
     time_tolerance = eval_cfg.get('time_tolerance', legacy_tolerance)
     
-    # 设置最小阈值，避免 baseline 值过小时要求不切实际的标准
-    MIN_ERROR_THRESHOLD = 1e-6  # 最小相对误差：0.0001%
-    MIN_TIME_THRESHOLD = 1.0    # 最小时间容差：1秒（考虑 Python/解释器开销）
+    # 设置最小误差阈值，避免 baseline 值过小时要求不切实际的标准
+    MIN_ERROR_THRESHOLD = 1e-6  # 最小相对误差：0.01%
     
     target_error = max(oracle_info['error'] * accuracy_tolerance, MIN_ERROR_THRESHOLD)
-    target_time = max(oracle_info['time'] * time_tolerance, MIN_TIME_THRESHOLD)
+    target_time = oracle_info['time'] * time_tolerance
     
     if error > target_error:
         status = 'FAIL'
@@ -498,7 +497,7 @@ def _make_error_result(case_id: str, status: str, error_msg: str, stderr: str = 
         'time_pass': False,
         'final_pass': False,
         'failure_stage': 'exec',
-        'failure_reason': error_msg[:200] if error_msg else 'Unknown'
+        'failure_reason': error_msg if error_msg else 'Unknown'
     }
     
     return result

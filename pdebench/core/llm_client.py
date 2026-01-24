@@ -59,6 +59,7 @@ class LLMClient:
         'haiku': {'provider': 'anthropic', 'model': 'anthropic.claude-3-haiku-20240307-v1:0'},
         'gemini': {'provider': 'google', 'model': 'gemini-3.0-pro'},
         'gemini-3.0-pro': {'provider': 'google', 'model': 'gemini-3.0-pro'},  # 实验 1.1 别名
+        'qwen3-max': {'provider': 'qwen', 'model': 'qwen3-max'},  # 千问最强版本
     }
     
     # 定价信息（USD per 1M tokens）- 实验 4.6 成本追踪
@@ -79,6 +80,8 @@ class LLMClient:
         # Google
         'gemini': {'input': 0.075, 'output': 0.30},
         'gemini-3.0-pro': {'input': 0.075, 'output': 0.30},
+        
+        'qwen3-max': {'input': 1.2, 'output': 6},
     }
     
     def __init__(self, agent_name: str, temperature: float = 0.0):
@@ -138,6 +141,17 @@ class LLMClient:
             if not api_key:
                 raise ValueError("Missing GOOGLE_API_KEY environment variable")
             self.client = genai.Client(api_key=api_key)
+            
+        elif self.provider == 'qwen':
+            from openai import OpenAI
+            api_key = os.getenv("DASHSCOPE_API_KEY")
+            if not api_key:
+                raise ValueError("Missing DASHSCOPE_API_KEY environment variable")
+            # 使用OpenAI兼容接口访问千问
+            self.client = OpenAI(
+                api_key=api_key,
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+            )
     
     def generate(self, prompt: str, system_prompt: Optional[str] = None) -> LLMResponse:
         """
@@ -164,6 +178,8 @@ class LLMClient:
                 return self._call_anthropic(prompt, system_prompt)
             elif self.provider == 'google':
                 return self._call_google(prompt, system_prompt)
+            elif self.provider == 'qwen':
+                return self._call_qwen(prompt, system_prompt)
         except Exception as e:
             logger.error(f"LLM call failed: {e}")
             return LLMResponse(
@@ -306,6 +322,55 @@ class LLMClient:
             total_tokens = response.usage_metadata.total_token_count
             
             # 计算成本（实验 4.6）
+            cost = self._calculate_cost(input_tokens, output_tokens)
+            
+            usage = {
+                'input_tokens': input_tokens,
+                'output_tokens': output_tokens,
+                'total_tokens': total_tokens,
+                'latency_sec': latency,
+                'cost_usd': cost
+            }
+        
+        return LLMResponse(
+            success=True,
+            code=code,
+            raw_response=raw_response,
+            model=self.model,
+            usage=usage
+        )
+    
+    def _call_qwen(self, prompt: str, system_prompt: str) -> LLMResponse:
+        """调用千问 Qwen API（通过OpenAI兼容接口）"""
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt}
+        ]
+        
+        kwargs = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature
+        }
+        
+        # 记录开始时间
+        start_time = time.time()
+        
+        response = self.client.chat.completions.create(**kwargs)
+        
+        # 计算延迟
+        latency = time.time() - start_time
+        
+        raw_response = response.choices[0].message.content.strip()
+        code = extract_code(raw_response)
+        
+        usage = {}
+        if response.usage:
+            input_tokens = response.usage.prompt_tokens
+            output_tokens = response.usage.completion_tokens
+            total_tokens = response.usage.total_tokens
+            
+            # 计算成本
             cost = self._calculate_cost(input_tokens, output_tokens)
             
             usage = {

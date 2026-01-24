@@ -23,15 +23,45 @@ EQUATION_TEMPLATES = {
         "equation": "-ε ∇²u + β·∇u = f   in Ω\n  u = g                on ∂Ω",
         "description": "May require stabilization (SUPG) for high Péclet numbers."
     },
+    "convection_diffusion_transient": {
+        "title": "Convection-Diffusion Equation (Transient)",
+        "equation": "∂u/∂t - ε ∇²u + β·∇u = f   in Ω × (0, T]\n  u = g                    on ∂Ω\n  u(x,0) = u₀(x)           in Ω",
+        "description": "Time-dependent convection-diffusion requiring time-stepping; stabilization may be needed at high Péclet numbers."
+    },
     "stokes": {
         "title": "Stokes Flow (Incompressible)",
         "equation": "-ν ∇²u + ∇p = f   in Ω\n  ∇·u = 0             in Ω\n  u = g               on ∂Ω",
         "description": "Steady incompressible flow; use Taylor-Hood mixed elements."
     },
-    "navier_stokes_incompressible": {
+    "navier_stokes": {
         "title": "Navier-Stokes (Incompressible, Steady)",
         "equation": "u·∇u - ν ∇²u + ∇p = f   in Ω\n  ∇·u = 0               in Ω\n  u = g                 on ∂Ω",
         "description": "Nonlinear steady incompressible flow; Newton/Picard is acceptable."
+    },
+    "darcy": {
+        "title": "Darcy Flow (Steady)",
+        "equation": "Elliptic (pressure) form:\n  -∇·(κ ∇p) = f   in Ω\n  p = g           on ∂Ω\n\nMixed (flux-pressure) form:\n  u + κ ∇p = 0     in Ω\n  ∇·u = f          in Ω\n  (boundary data depends on formulation)",
+        "description": "Steady porous-media flow. Elliptic pressure formulation and a stable mixed RT×DG formulation are both acceptable; report what you solve and what field you output."
+    },
+    "reaction_diffusion": {
+        "title": "Reaction-Diffusion Equation (Steady or Transient)",
+        "equation": "Steady:\n  -ε ∇²u + R(u) = f    in Ω\n  u = g              on ∂Ω\n\nTransient (if time params provided):\n  ∂u/∂t - ε ∇²u + R(u) = f   in Ω × (0,T]\n  u = g                    on ∂Ω\n  u(x,0) = u₀(x)           in Ω",
+        "description": "Scalar diffusion with (possibly nonlinear) reaction term. Newton/Picard/time-stepping are acceptable depending on R(u) and whether time dependence is present."
+    },
+    "helmholtz": {
+        "title": "Helmholtz Equation",
+        "equation": "-∇²u - k² u = f   in Ω\n  u = g          on ∂Ω",
+        "description": "Indefinite elliptic problem (can be challenging at large k); GMRES+ILU or a direct solver is acceptable."
+    },
+    "biharmonic": {
+        "title": "Biharmonic Equation",
+        "equation": "Δ²u = f   in Ω\n  u = g   on ∂Ω",
+        "description": "Fourth-order elliptic problem; a mixed formulation (two Poisson solves) is acceptable."
+    },
+    "linear_elasticity": {
+        "title": "Linear Elasticity (2D, Small Strain)",
+        "equation": "-∇·σ(u) = f   in Ω\n  u = g        on ∂Ω\n  σ(u) = 2μ ε(u) + λ tr(ε(u)) I,   ε(u)=sym(∇u)",
+        "description": "Vector-valued elliptic system; use a conforming vector FE space. CG+AMG or GMRES+AMG/direct is acceptable depending on conditioning."
     }
 }
 
@@ -63,8 +93,11 @@ def generate_prompt(case: Dict, oracle_info: Optional[Dict] = None) -> str:
     pde_type = case['oracle_config']['pde']['type']
     pde_config = case['oracle_config']['pde']
     
-    # 获取方程模板
-    eq_template = EQUATION_TEMPLATES.get(pde_type, EQUATION_TEMPLATES['poisson'])
+    # 获取方程模板（对流扩散：如果有 time 字段，使用 transient 模板）
+    if pde_type == "convection_diffusion" and "time" in pde_config:
+        eq_template = EQUATION_TEMPLATES["convection_diffusion_transient"]
+    else:
+        eq_template = EQUATION_TEMPLATES.get(pde_type, EQUATION_TEMPLATES['poisson'])
     
     # 构建prompt
     prompt = f"""# Task: Solve {eq_template['title']}
@@ -89,7 +122,7 @@ def generate_prompt(case: Dict, oracle_info: Optional[Dict] = None) -> str:
 **Manufactured Solution:** u = {manufactured['u']}
 (Source term f and boundary data are derived from this exact solution)
 """
-        if pde_type in ["stokes", "navier_stokes_incompressible"]:
+        if pde_type in ["stokes", "navier_stokes"]:
             prompt += f"**Manufactured Pressure:** p = {manufactured.get('p', 'N/A')}\n"
     else:
         source_term = pde_config.get('source_term')
@@ -123,10 +156,26 @@ def generate_prompt(case: Dict, oracle_info: Optional[Dict] = None) -> str:
         if peclet > 10:
             prompt += "⚠️ High Péclet number - consider SUPG stabilization!\n"
     
-    if pde_type in ['stokes', 'navier_stokes_incompressible']:
+    if pde_type in ['stokes', 'navier_stokes']:
         params = pde_config.get('pde_params', {})
         nu = params.get('nu', 1.0)
         prompt += f"\n**Viscosity:** ν = {nu}\n"
+
+    if pde_type == 'helmholtz':
+        params = pde_config.get('pde_params', {})
+        k = params.get('k', params.get('wave_number', 10.0))
+        prompt += f"\n**Wavenumber:** k = {k}\n"
+
+    if pde_type == 'linear_elasticity':
+        params = pde_config.get('pde_params', {})
+        E = params.get('E', None)
+        nu = params.get('nu', None)
+        lam = params.get('lambda', None)
+        mu = params.get('mu', None)
+        if E is not None and nu is not None:
+            prompt += f"\n**Material Parameters:** E = {E}, ν = {nu}\n"
+        elif lam is not None and mu is not None:
+            prompt += f"\n**Material Parameters:** λ = {lam}, μ = {mu}\n"
 
     # 时间相关参数
     if 'time' in pde_config:
@@ -184,23 +233,22 @@ Notes:
                 desc = desc.split('(')[0].strip()
             prompt += f"- {knob.get('name')}: {desc}\n"
 
-    # 添加Oracle参考信息
+    # 添加评测标准（不展示Oracle参考信息）
     if oracle_info:
-        tolerance = case.get("evaluation_config", {}).get("tolerance", 1.2)
-        target_error = oracle_info.get("error", 0.0) * tolerance
-        target_time = oracle_info.get("time", 0.0) * tolerance
+        eval_cfg = case.get("evaluation_config", {})
+        legacy_tolerance = eval_cfg.get("tolerance", 1.2)
+        accuracy_tolerance = eval_cfg.get("accuracy_tolerance", legacy_tolerance)
+        time_tolerance = eval_cfg.get("time_tolerance", legacy_tolerance)
+        # 与主链路一致：误差阈值有最小下限，时间阈值不设最小值
+        min_error_threshold = 1e-6
+        target_error = max(oracle_info.get("error", 0.0) * accuracy_tolerance, min_error_threshold)
+        target_time = oracle_info.get("time", 0.0) * time_tolerance
         prompt += f"""
 ---
 
-## Oracle Reference
-
-The oracle baseline achieved:
-- **Reference Error:** {oracle_info.get('error', 0):.2e}
-- **Reference Time:** {oracle_info.get('time', 0):.3f}s
-
 **Pass/Fail Criteria (single tier):**
-- Accuracy: error ≤ {target_error:.2e} (tolerance {tolerance:.2f}×)
-- Time: wall_time_sec ≤ {target_time:.3f}s (tolerance {tolerance:.2f}×)
+- Accuracy: error ≤ {target_error:.2e}
+- Time: wall_time_sec ≤ {target_time:.3f}s
 """
 
     prompt += """

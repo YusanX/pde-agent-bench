@@ -29,18 +29,34 @@ class MixedTypeMetricsComputer(SpecializedMetricsComputer):
         metrics = {}
         
         try:
-            # Read Péclet number
+            # Read Péclet number (prefer explicit field, fallback to epsilon/beta)
             pde_config = self.config.get('oracle_config', {}).get('pde', {})
             peclet = pde_config.get('peclet', None)
+            if peclet is None:
+                params = pde_config.get('pde_params', {})
+                epsilon = params.get('epsilon', None)
+                beta = params.get('beta', None)
+                if isinstance(epsilon, (int, float)) and epsilon != 0 and beta is not None:
+                    try:
+                        beta_norm = float(np.linalg.norm(beta))
+                        peclet = beta_norm / float(epsilon)
+                    except Exception:
+                        peclet = None
             if peclet is not None:
                 metrics['peclet_number'] = float(peclet)
             
-            # Read solution fields
+            # Read solution fields (solution.npz is the canonical output)
+            agent_npz = self.agent_output_dir / 'solution.npz'
             agent_u_file = self.agent_output_dir / 'u.npy'
-            
-            if agent_u_file.exists():
+            u_agent = None
+            if agent_npz.exists():
+                data = np.load(agent_npz)
+                if 'u' in data:
+                    u_agent = data['u']
+            elif agent_u_file.exists():
                 u_agent = np.load(agent_u_file)
-                
+            
+            if u_agent is not None:
                 # Total variation (physical property, not an error metric)
                 tv_agent = self._compute_total_variation(u_agent)
                 metrics['total_variation'] = float(tv_agent)

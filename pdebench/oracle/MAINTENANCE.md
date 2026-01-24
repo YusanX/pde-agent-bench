@@ -12,7 +12,21 @@
 --------
 - `oracle.py`: 统一入口与分发。
 - `common.py`: 网格、解析表达式、采样、误差计算等通用工具。
-- `<pde>.py`: 每个方程类型一个 solver（如 `poisson.py`、`heat.py`）。
+- `<pde>.py`: 每个方程类型一个 solver（如 `poisson.py`、`heat.py`、`stokes.py`、`navier_stokes.py`）。
+
+已实现的求解器
+------------
+- `poisson.py`: Poisson 方程（标量椭圆问题）
+- `darcy.py`: Darcy 流（椭圆压力形式与混合形式 RT×DG）
+- `reaction_diffusion.py`: Reaction-Diffusion（稳态/可选瞬态；含非线性反应项，Newton/SNES）
+- `heat.py`: 热传导方程（时间依赖抛物问题）
+- `convection_diffusion.py`: 对流扩散方程
+- `stokes.py`: Stokes 方程（稳态不可压缩流动，线性问题）
+- `navier_stokes.py`: Navier-Stokes 方程（稳态不可压缩流动，**非线性问题**）
+  - 使用 Newton 迭代求解非线性对流项 (u·∇)u
+  - 支持 manufactured solution 和 reference solution
+  - Taylor-Hood 混合元（P2/P1 或 P3/P2）保证 inf-sup 稳定性
+  - 压力零空间固定（点约束或均值约束）
 
 新增方程类型流程
 --------------
@@ -51,6 +65,12 @@
 - 对解析解使用 `sympy` → UFL 转换，不要用 Python callable 直接传给 `fem.Expression`。
 - 时间依赖问题的 Dirichlet 边界应随时间更新。
 - 对混合问题（如 Stokes/NS）应处理压力零空间（固定一点或去均值）。
+- **非线性问题（如 NS）**应使用 Newton 迭代：
+  - 用 Stokes 解作为初始猜测（提高收敛性）
+  - 使用 `ufl.derivative()` 自动计算 Jacobian 矩阵
+  - 支持 relaxation 参数（线搜索）提高鲁棒性
+  - oracle_solver 配置应包含 `rtol`、`atol`、`max_it` 参数
+  - manufactured solution 的源项需包含非线性项（手动推导）
 
 调试建议
 --------
