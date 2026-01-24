@@ -1,0 +1,170 @@
+```python
+import numpy as np
+from mpi4py import MPI
+from dolfinx import mesh, fem, geometry
+from dolfinx.fem import petsc
+import ufl
+from petsc4py import PETSc
+
+ScalarType = PETSc.ScalarType
+
+def solve(case_spec: dict) -> dict:
+    # Parameters
+    eps = 0.1
+    beta = [1.0, 0.5]
+    t_end = 0.1
+    dt = 0.02
+    nx = ny = 32
+    element_degree = 1
+    
+    # Create mesh
+    comm = MPI.COMM_WORLD
+    domain = mesh.create_unit_square(comm, nx, ny, cell_type=mesh.CellType.triangle)
+    
+    # Function space
+    V = fem.functionspace(domain, ("Lagrange", element_degree))
+    
+    # Time parameters
+    num_steps = int(t_end / dt)
+    t = 0.0
+    
+    # Define exact solution for boundary and initial conditions
+    x = ufl.SpatialCoordinate(domain)
+    u_exact_expr = ufl.exp(-t) * ufl.sin(ufl.pi * x[0]) * ufl.sin(ufl.pi * x[1])
+    
+    # Initial condition
+    u_n = fem.Function(V)
+    u_n.interpolate(lambda x: np.exp(-0.0) * np.sin(np.pi * x[0]) * np.sin(np.pi * x[1]))
+    
+    # Boundary condition (Dirichlet on entire boundary)
+    def boundary_marker(x):
+        return np.logical_or(
+            np.logical_or(np.isclose(x[0], 0.0), np.isclose(x[0], 1.0)),
+            np.logical_or(np.isclose(x[1], 0.0), np.isclose(x[1], 1.0))
+        )
+    
+    tdim = domain.topology.dim
+    fdim = tdim - 1
+    boundary_facets = mesh.locate_entities_boundary(domain, fdim, boundary_marker)
+    dofs = fem.locate_dofs_topological(V, fdim, boundary_facets)
+    
+    # Trial and test functions
+    u = ufl.TrialFunction(V)
+    v = ufl.TestFunction(V)
+    
+    # Convection vector
+    beta_ufl = ufl.as_vector(beta)
+    
+    # SUPG stabilization parameter
+    h = ufl.CellDiameter(domain)
+    Pe = ufl.sqrt(ufl.dot(beta_ufl, beta_ufl)) * h / (2.0 * eps)
+    tau = ufl.conditional(ufl.gt(Pe, 1.0), h / (2.0 * ufl.sqrt(ufl.dot(beta_ufl, beta_ufl))) * (1.0 - 1.0/Pe), 0.0)
+    
+    # Time derivative
+    u_t = (u - u_n) / dt
+    
+    # Weak form without stabilization
+    a = u_t * v * ufl.dx + eps * ufl.dot(ufl.grad(u), ufl.grad(v)) * ufl.dx + ufl.dot(beta_ufl, ufl.grad(u)) * v * ufl.dx
+    L = u_t * v * ufl.dx + eps * ufl.dot(ufl.grad(u), ufl.grad(v)) * ufl.dx + ufl.dot(beta_ufl, ufl.grad(u)) * v * ufl.dx
+    
+    # Add SUPG stabilization
+    a += tau * (u_t + ufl.dot(beta_ufl, ufl.grad(u)) - eps * ufl.div(ufl.grad(u))) * ufl.dot(beta_ufl, ufl.grad(v)) * ufl.dx
+    L += tau * (u_t + ufl.dot(beta_ufl, ufl.grad(u)) - eps * ufl.div(ufl.grad(u))) * ufl.dot(beta_ufl, ufl.grad(v)) * ufl.dx
+    
+    # Source term derived from manufactured solution
+    u_m = ufl.exp(-t) * ufl.sin(ufl.pi * x[0]) * ufl.sin(ufl.pi * x[1])
+    f_expr = -ufl.diff(u_m, t) + eps * ufl.div(ufl.grad(u_m)) - ufl.dot(beta_ufl, ufl.grad(u_m))
+    f = fem.Constant(domain, ScalarType(0.0))
+    
+    # Update L with source term
+    L = f * v * ufl.dx
+    L += tau * f * ufl.dot(beta_ufl, ufl.grad(v)) * ufl.dx
+    
+    # Compile forms
+    a_form = fem.form(a)
+    L_form = fem.form(L)
+    
+    # Assemble matrix
+    A = petsc.assemble_matrix(a_form, bcs=[])
+    A.assemble()
+    
+    # Create RHS vector
+    b = petsc.create_vector(L_form)
+    
+    # Solver setup
+    solver = PETSc.KSP().create(comm)
+    solver.setOperators(A)
+    solver.setType(PETSc.KSP.Type.GMRES)
+    solver.getPC().setType(PETSc.PC.Type.ILU)
+    solver.rtol = 1e-8
+    
+    # Time-stepping
+    u_h = fem.Function(V)
+    u_h.x.array[:] = u_n.x.array
+    
+    for n in range(num_steps):
+        t += dt
+        
+        # Update boundary condition
+        u_bc = fem.Function(V)
+        u_bc.interpolate(lambda x: np.exp(-t) * np.sin(np.pi * x[0]) * np.sin(np.pi * x[1]))
+        bc = fem.dirichletbc(u_bc, dofs)
+        
+        # Update source term
+        f_value = fem.Expression(f_expr, V.element.interpolation_points)
+        f.value = f_value.eval(np.zeros((3, 1)), np.zeros(1, dtype=np.int32))[0]
+        
+        # Assemble RHS
+        with b.localForm() as loc:
+            loc.set(0)
+        petsc.assemble_vector(b, L_form)
+        petsc.apply_lifting(b, [a_form], bcs=[[bc]])
+        b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+        petsc.set_bc(b, [bc])
+        
+        # Solve
+        solver.solve(b, u_h.x.petsc_vec)
+        u_h.x.scatter_forward()
+        
+        # Update previous solution
+        u_n.x.array[:] = u_h.x.array[:]
+    
+    # Evaluate on 50x50 grid
+    nx_out = ny_out = 50
+    x_points = np.linspace(0, 1, nx_out)
+    y_points = np.linspace(0, 1, ny_out)
+    X, Y = np.meshgrid(x_points, y_points, indexing='ij')
+    points = np.zeros((3, nx_out * ny_out))
+    points[0] = X.flatten()
+    points[1] = Y.flatten()
+    
+    # Create bounding box tree
+    bb_tree = geometry.bb_tree(domain, domain.topology.dim)
+    cells = []
+    points_on_proc = []
+    for i, point in enumerate(points.T):
+        cell_candidates = geometry.compute_collisions_points(bb_tree, point)
+        colliding_cells = geometry.compute_colliding_cells(domain, cell_candidates, point)
+        if len(colliding_cells.links(i)) > 0:
+            cells.append(colliding_cells.links(i)[0])
+            points_on_proc.append(point)
+    
+    u_values = np.full((nx_out * ny_out,), np.nan)
+    if len(points_on_proc) > 0:
+        u_eval = u_h.eval(points_on_proc, cells)
+        u_values[:len(u_eval)] = u_eval.flatten()
+    
+    # Reshape to 2D grid
+    u_grid = u_values.reshape((nx_out, ny_out))
+    
+    return {
+        "u": u_grid,
+        "solver_info": {
+            "mesh_resolution": nx,
+            "element_degree": element_degree,
+            "ksp_type": "gmres",
+            "pc_type": "ilu",
+            "rtol": 1e-8
+        }
+    }
+```

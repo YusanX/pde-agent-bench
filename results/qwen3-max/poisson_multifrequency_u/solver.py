@@ -1,0 +1,89 @@
+import numpy as np
+from mpi4py import MPI
+from dolfinx import mesh, fem, geometry
+from dolfinx.fem import petsc
+import ufl
+from petsc4py import PETSc
+
+def solve(case_spec: dict) -> dict:
+    # Parameters
+    mesh_resolution = 64
+    element_degree = 2
+    ksp_type = "cg"
+    pc_type = "hypre"
+    rtol = 1e-6
+    
+    comm = MPI.COMM_WORLD
+    domain = mesh.create_unit_square(comm, mesh_resolution, mesh_resolution, cell_type=mesh.CellType.triangle)
+    
+    V = fem.functionspace(domain, ("Lagrange", element_degree))
+    
+    # Exact solution for boundary conditions
+    x = ufl.SpatialCoordinate(domain)
+    u_exact_expr = ufl.sin(ufl.pi * x[0]) * ufl.sin(ufl.pi * x[1]) + 0.3 * ufl.sin(6 * ufl.pi * x[0]) * ufl.sin(6 * ufl.pi * x[1])
+    
+    # Boundary condition
+    u_bc = fem.Function(V)
+    u_bc.interpolate(fem.Expression(u_exact_expr, V.element.interpolation_points))
+    bc = fem.dirichletbc(u_bc, fem.locate_dofs_geometrical(V, lambda x: np.full(x.shape[1], True)))
+    
+    # Source term
+    kappa = fem.Constant(domain, PETSc.ScalarType(1.0))
+    f_expr = -ufl.div(kappa * ufl.grad(u_exact_expr))
+    f = fem.Constant(domain, PETSc.ScalarType(1.0))  # Placeholder, will be replaced by expression
+    
+    # Variational form
+    u = ufl.TrialFunction(V)
+    v = ufl.TestFunction(V)
+    a = kappa * ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx
+    L = ufl.inner(f_expr, v) * ufl.dx
+    
+    # Solve
+    problem = petsc.LinearProblem(
+        a, L, bcs=[bc],
+        petsc_options={
+            "ksp_type": ksp_type,
+            "pc_type": pc_type,
+            "ksp_rtol": rtol,
+            "pc_hYPRE_type": "boomeramg"
+        },
+        petsc_options_prefix="poisson_"
+    )
+    u_sol = problem.solve()
+    
+    # Create evaluation grid
+    nx, ny = 50, 50
+    x_eval = np.linspace(0, 1, nx)
+    y_eval = np.linspace(0, 1, ny)
+    X, Y = np.meshgrid(x_eval, y_eval, indexing='ij')
+    points = np.zeros((3, nx * ny))
+    points[0] = X.flatten()
+    points[1] = Y.flatten()
+    
+    # Evaluate solution on grid
+    bb_tree = geometry.bb_tree(domain, domain.topology.dim)
+    cells = []
+    points_on_proc = []
+    for i in range(points.shape[1]):
+        point = points[:, i]
+        candidate_cells = geometry.compute_collisions_points(bb_tree, point.reshape(1, -1))
+        colliding_cells = geometry.compute_colliding_cells(domain, candidate_cells, point.reshape(1, -1))
+        if len(colliding_cells.links(0)) > 0:
+            cells.append(colliding_cells.links(0)[0])
+            points_on_proc.append(point)
+        else:
+            cells.append(0)
+            points_on_proc.append(point)
+    
+    u_values = u_sol.eval(points_on_proc, cells).flatten()
+    u_grid = u_values.reshape((nx, ny))
+    
+    solver_info = {
+        "mesh_resolution": mesh_resolution,
+        "element_degree": element_degree,
+        "ksp_type": ksp_type,
+        "pc_type": pc_type,
+        "rtol": rtol
+    }
+    
+    return {"u": u_grid, "solver_info": solver_info}

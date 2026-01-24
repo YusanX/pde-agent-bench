@@ -1,0 +1,185 @@
+import numpy as np
+from mpi4py import MPI
+from dolfinx import mesh, fem, geometry
+from dolfinx.fem import petsc
+import ufl
+from petsc4py import PETSc
+
+def solve(case_spec: dict) -> dict:
+    # Parameters from case_spec or defaults
+    stabilization = case_spec.get("stabilization", "supg")
+    upwind_parameter = case_spec.get("upwind_parameter", 1.0)
+    dt = case_spec.get("dt", 0.02)
+    mesh_resolution = case_spec.get("mesh_resolution", 64)
+    ksp_type = case_spec.get("ksp_type", "gmres")
+    pc_type = case_spec.get("pc_type", "ilu")
+    rtol = case_spec.get("rtol", 1e-8)
+    
+    # Problem parameters
+    epsilon = 0.02
+    beta = [6.0, 2.0]
+    t_end = 0.1
+    num_steps = int(t_end / dt)
+    
+    # Create mesh and function space
+    comm = MPI.COMM_WORLD
+    domain = mesh.create_unit_square(comm, mesh_resolution, mesh_resolution, cell_type=mesh.CellType.triangle)
+    V = fem.functionspace(domain, ("Lagrange", 1))
+    
+    # Define boundary condition (u = 0 on all boundaries)
+    def boundary_marker(x):
+        return np.logical_or.reduce((
+            np.isclose(x[0], 0.0),
+            np.isclose(x[0], 1.0),
+            np.isclose(x[1], 0.0),
+            np.isclose(x[1], 1.0)
+        ))
+    
+    fdim = domain.topology.dim - 1
+    boundary_facets = mesh.locate_entities_boundary(domain, fdim, boundary_marker)
+    dofs = fem.locate_dofs_topological(V, fdim, boundary_facets)
+    u_bc = fem.Function(V)
+    u_bc.x.array[:] = 0.0
+    bc = fem.dirichletbc(u_bc, dofs)
+    
+    # Define time-dependent functions
+    t = 0.0
+    u_n = fem.Function(V)
+    u_n.x.array[:] = 0.0  # Initial condition u0 = 0.0
+    
+    # Source term f = exp(-200*((x-0.3)**2 + (y-7)**2))*exp(-t)
+    x = ufl.SpatialCoordinate(domain)
+    f_expr = ufl.exp(-200 * ((x[0] - 0.3)**2 + (x[1] - 0.7)**2)) * ufl.exp(-t)
+    f = fem.Constant(domain, PETSc.ScalarType(0.0))
+    
+    # Velocity vector
+    beta_vec = ufl.as_vector(beta)
+    
+    # Trial and test functions
+    u = ufl.TrialFunction(V)
+    v = ufl.TestFunction(V)
+    
+    # Time derivative term
+    F = (u - u_n) / dt * v * ufl.dx
+    
+    # Diffusion term
+    F += epsilon * ufl.dot(ufl.grad(u), ufl.grad(v)) * ufl.dx
+    
+    # Convection term
+    F += ufl.dot(beta_vec, ufl.grad(u)) * v * ufl.dx
+    
+    # Source term
+    F -= f * v * ufl.dx
+    
+    # SUPG stabilization
+    if stabilization == "supg":
+        h = ufl.CellDiameter(domain)
+        Pe = ufl.sqrt(ufl.dot(beta_vec, beta_vec)) * h / (2.0 * epsilon)
+        tau = ufl.conditional(
+            ufl.gt(Pe, 1.0),
+            h / (2.0 * ufl.sqrt(ufl.dot(beta_vec, beta_vec))) * (1.0 / ufl.tanh(Pe) - 1.0 / Pe),
+            h**2 / (12.0 * epsilon)
+        )
+        # Residual of the PDE
+        R = (u - u_n) / dt - epsilon * ufl.div(ufl.grad(u)) + ufl.dot(beta_vec, ufl.grad(u)) - f
+        F += tau * ufl.dot(beta_vec, ufl.grad(v)) * R * ufl.dx
+    
+    # Split into bilinear and linear forms
+    a = ufl.lhs(F)
+    L = ufl.rhs(F)
+    
+    # Create forms
+    a_form = fem.form(a)
+    L_form = fem.form(L)
+    
+    # Assemble matrix
+    A = petsc.assemble_matrix(a_form, bcs=[bc])
+    A.assemble()
+    
+    # Create RHS vector
+    b = petsc.create_vector(L_form)
+    
+    # Set up solver
+    solver = PETSc.KSP().create(domain.comm)
+    solver.setOperators(A)
+    solver.setType(ksp_type)
+    solver.getPC().setType(pc_type)
+    solver.setTolerances(rtol=rtol)
+    
+    # Time-stepping
+    u_h = fem.Function(V)
+    for n in range(num_steps):
+        t += dt
+        # Update source term
+        f.value = np.exp(-200 * ((x[0] - 0.3)**2 + (x[1] - 0.7)**2)) * np.exp(-t)
+        # This is not directly possible, so we need to re-express f in UFL with current t
+        # Instead, we'll update the expression by redefining L with current t
+        
+        # Redefine L with current t
+        f_current = ufl.exp(-200 * ((x[0] - 0.3)**2 + (x[1] - 0.7)**2)) * ufl.exp(-t)
+        L_new = u_n / dt * v * ufl.dx + epsilon * ufl.dot(ufl.grad(u), ufl.grad(v)) * ufl.dx + ufl.dot(beta_vec, ufl.grad(u)) * v * ufl.dx - f_current * v * ufl.dx
+        
+        if stabilization == "supg":
+            R_new = (u - u_n) / dt - epsilon * ufl.div(ufl.grad(u)) + ufl.dot(beta_vec, ufl.grad(u)) - f_current
+            L_new += tau * ufl.dot(beta_vec, ufl.grad(v)) * R_new * ufl.dx
+        
+        L_form = fem.form(L_new)
+        
+        # Assemble RHS
+        with b.localForm() as loc:
+            loc.set(0)
+        petsc.assemble_vector(b, L_form)
+        petsc.apply_lifting(b, [a_form], bcs=[[bc]])
+        b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+        petsc.set_bc(b, [bc])
+        
+        # Solve
+        solver.solve(b, u_h.x.petsc_vec)
+        u_h.x.scatter_forward()
+        
+        # Update u_n
+        u_n.x.array[:] = u_h.x.array[:]
+    
+    # Prepare output grid
+    nx, ny = 50, 50
+    x_points = np.linspace(0, 1, nx)
+    y_points = np.linspace(0, 1, ny)
+    X, Y = np.meshgrid(x_points, y_points, indexing='ij')
+    points = np.zeros((3, nx * ny))
+    points[0] = X.flatten()
+    points[1] = Y.flatten()
+    
+    # Evaluate solution on grid
+    bb_tree = geometry.bb_tree(domain, domain.topology.dim)
+    cell_candidates = geometry.compute_collisions_points(bb_tree, points.T)
+    colliding_cells = geometry.compute_colliding_cells(domain, cell_candidates, points.T)
+    
+    points_on_proc = []
+    cells_on_proc = []
+    eval_map = []
+    for i in range(points.shape[1]):
+        links = colliding_cells.links(i)
+        if len(links) > 0:
+            points_on_proc.append(points.T[i])
+            cells_on_proc.append(links[0])
+            eval_map.append(i)
+    
+    u_values = np.full((points.shape[1],), np.nan)
+    if len(points_on_proc) > 0:
+        vals = u_h.eval(np.array(points_on_proc), np.array(cells_on_proc, dtype=np.int32))
+        u_values[eval_map] = vals.flatten()
+    
+    u_grid = u_values.reshape((nx, ny))
+    
+    solver_info = {
+        "mesh_resolution": mesh_resolution,
+        "element_degree": 1,
+        "ksp_type": ksp_type,
+        "pc_type": pc_type,
+        "rtol": rtol
+    }
+    
+    return {
+        "u": u_grid,
+        "solver_info": solver_info
+    }

@@ -1,0 +1,146 @@
+```python
+import numpy as np
+from mpi4py import MPI
+from dolfinx import mesh, fem, geometry
+from dolfinx.fem import petsc
+import ufl
+from petsc4py import PETSc
+
+ScalarType = PETSc.ScalarType
+
+def solve(case_spec: dict) -> dict:
+    # Parameters
+    t_end = 0.1
+    dt = 0.005
+    num_steps = int(t_end / dt)
+    
+    # Mesh and function space
+    mesh_resolution = 32
+    element_degree = 2
+    comm = MPI.COMM_WORLD
+    domain = mesh.create_unit_square(comm, mesh_resolution, mesh_resolution, cell_type=mesh.CellType.triangle)
+    V = fem.functionspace(domain, ("Lagrange", element_degree))
+    
+    # Time variables
+    t = 0.0
+    
+    # Exact solution for boundary and initial conditions
+    def exact_solution(x, t_val):
+        return np.exp(-t_val) * np.sin(4 * np.pi * x[0]) * np.sin(4 * np.pi * x[1])
+    
+    # Initial condition
+    u_n = fem.Function(V)
+    u_n.interpolate(lambda x: exact_solution(x, 0.0))
+    
+    # Boundary condition (Dirichlet on entire boundary)
+    def boundary_marker(x):
+        return np.logical_or.reduce([
+            np.isclose(x[0], 0.0),
+            np.isclose(x[0], 1.0),
+            np.isclose(x[1], 0.0),
+            np.isclose(x[1], 1.0)
+        ])
+    
+    tdim = domain.topology.dim
+    fdim = tdim - 1
+    boundary_facets = mesh.locate_entities_boundary(domain, fdim, boundary_marker)
+    dofs = fem.locate_dofs_topological(V, fdim, boundary_facets)
+    
+    # Define time-dependent boundary condition function
+    u_bc = fem.Function(V)
+    bc = fem.dirichletbc(u_bc, dofs)
+    
+    # Variational problem
+    u = ufl.TrialFunction(V)
+    v = ufl.TestFunction(V)
+    kappa = fem.Constant(domain, ScalarType(1.0))
+    
+    # Time derivative term
+    F = u * v * ufl.dx + dt * kappa * ufl.dot(ufl.grad(u), ufl.grad(v)) * ufl.dx - (u_n * v * ufl.dx)
+    
+    a = ufl.lhs(F)
+    L = ufl.rhs(F)
+    
+    # Prepare linear solver
+    a_form = fem.form(a)
+    L_form = fem.form(L)
+    
+    A = petsc.assemble_matrix(a_form, bcs=[bc])
+    A.assemble()
+    
+    b = petsc.create_vector(L_form)
+    
+    solver = PETSc.KSP().create(domain.comm)
+    solver.setOperators(A)
+    solver.setType(PETSc.KSP.Type.CG)
+    solver.getPC().setType(PETSc.PC.Type.HYPRE)
+    solver.setTolerances(rtol=1e-8)
+    ksp_type = "cg"
+    pc_type = "hypre"
+    rtol = 1e-8
+    
+    # Time stepping
+    u_h = fem.Function(V)
+    u_h.x.array[:] = u_n.x.array
+    
+    for n in range(num_steps):
+        t += dt
+        
+        # Update boundary condition
+        u_bc.interpolate(lambda x: exact_solution(x, t))
+        
+        # Assemble RHS
+        with b.localForm() as loc:
+            loc.set(0)
+        petsc.assemble_vector(b, L_form)
+        petsc.apply_lifting(b, [a_form], bcs=[[bc]])
+        b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+        petsc.set_bc(b, [bc])
+        
+        # Solve
+        solver.solve(b, u_h.x.petsc_vec)
+        u_h.x.scatter_forward()
+        
+        # Update previous solution
+        u_n.x.array[:] = u_h.x.array
+    
+    # Create evaluation grid
+    nx, ny = 50, 50
+    x = np.linspace(0, 1, nx)
+    y = np.linspace(0, 1, ny)
+    X, Y = np.meshgrid(x, y, indexing='ij')
+    points = np.zeros((3, nx * ny))
+    points[0] = X.flatten()
+    points[1] = Y.flatten()
+    
+    # Evaluate solution on grid
+    bb_tree = geometry.bb_tree(domain, domain.topology.dim)
+    cell_candidates = geometry.compute_collisions_points(bb_tree, points.T)
+    colliding_cells = geometry.compute_colliding_cells(domain, cell_candidates, points.T)
+    
+    points_on_proc = []
+    cells_on_proc = []
+    for i in range(points.shape[1]):
+        if len(colliding_cells.links(i)) > 0:
+            points_on_proc.append(points[:, i])
+            cells_on_proc.append(colliding_cells.links(i)[0])
+    
+    u_values = np.full((nx * ny,), np.nan)
+    if len(points_on_proc) > 0:
+        u_eval = u_h.eval(np.array(points_on_proc), np.array(cells_on_proc, dtype=np.int32))
+        u_values = u_eval.flatten()
+    
+    # Reshape to 2D grid
+    u_grid = u_values.reshape((nx, ny))
+    
+    return {
+        "u": u_grid,
+        "solver_info": {
+            "mesh_resolution": mesh_resolution,
+            "element_degree": element_degree,
+            "ksp_type": ksp_type,
+            "pc_type": pc_type,
+            "rtol": rtol
+        }
+    }
+```

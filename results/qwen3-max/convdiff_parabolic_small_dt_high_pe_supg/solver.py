@@ -1,0 +1,182 @@
+import numpy as np
+from mpi4py import MPI
+from dolfinx import mesh, fem, geometry
+from dolfinx.fem import petsc
+import ufl
+from petsc4py import PETSc
+
+ScalarType = PETSc.ScalarType
+
+def solve(case_spec: dict) -> dict:
+    # Parameters from case_spec or defaults
+    stabilization = case_spec.get("stabilization", "supg")
+    upwind_parameter = case_spec.get("upwind_parameter", 0.5)
+    dt_val = case_spec.get("dt", 0.005)
+    mesh_resolution = case_spec.get("mesh_resolution", 64)
+    ksp_type = case_spec.get("ksp_type", "gmres")
+    pc_type = case_spec.get("pc_type", "ilu")
+    rtol = case_spec.get("rtol", 1e-8)
+    
+    # Problem parameters
+    eps = 0.01
+    beta = [12.0, 4.0]
+    t_end = 0.06
+    dt = dt_val
+    num_steps = int(t_end / dt)
+    
+    # Create mesh
+    comm = MPI.COMM_WORLD
+    domain = mesh.create_unit_square(comm, mesh_resolution, mesh_resolution, cell_type=mesh.CellType.triangle)
+    
+    # Function space
+    V = fem.functionspace(domain, ("Lagrange", 1))
+    
+    # Boundary condition (Dirichlet everywhere)
+    def boundary_marker(x):
+        return np.full_like(x[0], True)
+    
+    fdim = domain.topology.dim - 1
+    boundary_facets = mesh.locate_entities_boundary(domain, fdim, boundary_marker)
+    dofs = fem.locate_dofs_topological(V, fdim, boundary_facets)
+    
+    # Exact solution for BC and initial condition
+    def exact_solution(x, t):
+        return np.exp(-t) * np.sin(4 * np.pi * x[0]) * np.sin(np.pi * x[1])
+    
+    u_bc = fem.Function(V)
+    u_bc.interpolate(lambda x: exact_solution(x, 0.0))
+    bc = fem.dirichletbc(u_bc, dofs)
+    
+    # Initial condition
+    u_n = fem.Function(V)
+    u_n.interpolate(lambda x: exact_solution(x, 0.0))
+    
+    # Time-dependent exact solution for source term
+    t = 0.0
+    u_exact_expr = lambda x: exact_solution(x, t)
+    
+    # Define variational problem
+    u = ufl.TrialFunction(V)
+    v = ufl.TestFunction(V)
+    
+    # Constants
+    eps_const = fem.Constant(domain, ScalarType(eps))
+    beta_const = fem.Constant(domain, (ScalarType(beta[0]), ScalarType(beta[1])))
+    dt_const = fem.Constant(domain, ScalarType(dt))
+    
+    # Source term f derived from manufactured solution
+    x = ufl.SpatialCoordinate(domain)
+    u_mms = ufl.exp(-t) * ufl.sin(4 * ufl.pi * x[0]) * ufl.sin(ufl.pi * x[1])
+    ut = ufl.diff(u_mms, t)
+    laplacian_u = ufl.div(ufl.grad(u_mms))
+    conv_term = ufl.dot(beta_const, ufl.grad(u_mms))
+    f_expr = ut - eps_const * laplacian_u + conv_term
+    
+    f = fem.Expression(f_expr, V.element.interpolation_points)
+    f_func = fem.Function(V)
+    f_func.interpolate(f)
+    
+    # Standard Galerkin form
+    a = (u * v / dt_const + eps_const * ufl.dot(ufl.grad(u), ufl.grad(v)) + ufl.dot(beta_const, ufl.grad(u)) * v) * ufl.dx
+    L = (u_n / dt_const * v + f_func * v) * ufl.dx
+    
+    # SUPG stabilization
+    if stabilization == "supg":
+        h = ufl.CellDiameter(domain)
+        Pe = ufl.sqrt(ufl.dot(beta_const, beta_const)) * h / (2.0 * eps_const)
+        tau = ufl.conditional(
+            ufl.gt(Pe, 1.0),
+            upwind_parameter * h / (2.0 * ufl.sqrt(ufl.dot(beta_const, beta_const))),
+            upwind_parameter * h**2 / (12.0 * eps_const)
+        )
+        r = u / dt_const - eps_const * ufl.div(ufl.grad(u)) + ufl.dot(beta_const, ufl.grad(u)) - f_func
+        a += tau * ufl.dot(beta_const, ufl.grad(v)) * r * ufl.dx
+        L += tau * ufl.dot(beta_const, ufl.grad(v)) * (u_n / dt_const - eps_const * ufl.div(ufl.grad(u_n)) + ufl.dot(beta_const, ufl.grad(u_n)) - f_func) * ufl.dx
+    
+    # Prepare forms
+    a_form = fem.form(a)
+    L_form = fem.form(L)
+    
+    # Assemble matrix
+    A = petsc.assemble_matrix(a_form, bcs=[bc])
+    A.assemble()
+    
+    # Create RHS vector
+    b = petsc.create_vector(L_form)
+    
+    # Solver setup
+    solver = PETSc.KSP().create(domain.comm)
+    solver.setOperators(A)
+    solver.setType(ksp_type)
+    solver.getPC().setType(pc_type)
+    solver.setTolerances(rtol=rtol)
+    
+    # Time-stepping
+    u_h = fem.Function(V)
+    u_h.x.array[:] = u_n.x.array
+    
+    for n in range(num_steps):
+        t += dt
+        
+        # Update source term
+        f_expr = ut - eps_const * laplacian_u + conv_term
+        f = fem.Expression(f_expr, V.element.interpolation_points)
+        f_func.interpolate(f)
+        
+        # Update boundary condition
+        u_bc.interpolate(lambda x: exact_solution(x, t))
+        
+        # Assemble RHS
+        with b.localForm() as loc:
+            loc.set(0)
+        petsc.assemble_vector(b, L_form)
+        petsc.apply_lifting(b, [a_form], bcs=[[bc]])
+        b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+        petsc.set_bc(b, [bc])
+        
+        # Solve
+        solver.solve(b, u_h.x.petsc_vec)
+        u_h.x.scatter_forward()
+        
+        # Update previous solution
+        u_n.x.array[:] = u_h.x.array[:]
+    
+    # Evaluate on 50x50 grid
+    nx, ny = 50, 50
+    x = np.linspace(0, 1, nx)
+    y = np.linspace(0, 1, ny)
+    X, Y = np.meshgrid(x, y, indexing='ij')
+    points = np.zeros((3, nx * ny))
+    points[0] = X.flatten()
+    points[1] = Y.flatten()
+    
+    # Create bounding box tree
+    bb_tree = geometry.bb_tree(domain, domain.topology.dim)
+    cells = []
+    points_on_proc = []
+    for i, point in enumerate(points.T):
+        cell_candidates = geometry.compute_collisions_points(bb_tree, point.reshape(1, 3))
+        colliding_cells = geometry.compute_colliding_cells(domain, cell_candidates, point.reshape(1, 3))
+        if len(colliding_cells.links(0)) > 0:
+            cells.append(colliding_cells.links(0)[0])
+            points_on_proc.append(point)
+    
+    u_values = np.full((nx * ny,), np.nan)
+    if len(points_on_proc) > 0:
+        u_eval = u_h.eval(points_on_proc, cells)
+        u_values[:len(u_eval)] = u_eval.flatten()
+    
+    u_grid = u_values.reshape((nx, ny))
+    
+    solver_info = {
+        "mesh_resolution": mesh_resolution,
+        "element_degree": 1,
+        "ksp_type": ksp_type,
+        "pc_type": pc_type,
+        "rtol": rtol
+    }
+    
+    return {
+        "u": u_grid,
+        "solver_info": solver_info
+    }

@@ -1,0 +1,134 @@
+import numpy as np
+from mpi4py import MPI
+from dolfinx import mesh, fem, geometry, nls
+from dolfinx.fem import petsc
+import ufl
+from petsc4py import PETSc
+
+def solve(case_spec: dict) -> dict:
+    # Parameters
+    mesh_resolution = 64
+    degree_u = 2
+    degree_p = 1
+    newton_rtol = 1e-6
+    newton_max_it = 20
+    nu = 0.08
+    
+    # Create mesh
+    comm = MPI.COMM_WORLD
+    domain = mesh.create_unit_square(comm, mesh_resolution, mesh_resolution, cell_type=mesh.CellType.triangle)
+    
+    # Function spaces (Taylor-Hood)
+    V = fem.functionspace(domain, ("Lagrange", degree_u, (domain.geometry.dim,)))
+    Q = fem.functionspace(domain, ("Lagrange", degree_p))
+    W = V * Q
+    
+    # Trial and test functions
+    w = fem.Function(W)
+    (u, p) = ufl.split(w)
+    (v, q) = ufl.TestFunctions(W)
+    
+    # Boundary conditions (lid-driven cavity: top wall moves, others stationary)
+    tdim = domain.topology.dim
+    fdim = tdim - 1
+    
+    # Top wall (y=1): u = (1, 0)
+    def top_wall(x):
+        return np.isclose(x[1], 1.0)
+    
+    # Other walls: u = (0, 0)
+    def other_walls(x):
+        return np.logical_or.reduce((
+            np.isclose(x[0], 0.0),
+            np.isclose(x[0], 1.0),
+            np.isclose(x[1], 0.0)
+        ))
+    
+    # Top wall BC
+    u_top = fem.Function(V)
+    u_top.interpolate(lambda x: np.vstack((np.ones(x.shape[1]), np.zeros(x.shape[1]))))
+    top_facets = mesh.locate_entities_boundary(domain, fdim, top_wall)
+    top_dofs = fem.locate_dofs_topological((W.sub(0), V), fdim, top_facets)
+    bc_top = fem.dirichletbc(u_top, top_dofs, W.sub(0))
+    
+    # Other walls BC
+    u_other = fem.Function(V)
+    u_other.interpolate(lambda x: np.zeros((2, x.shape[1])))
+    other_facets = mesh.locate_entities_boundary(domain, fdim, other_walls)
+    other_dofs = fem.locate_dofs_topological((W.sub(0), V), fdim, other_facets)
+    bc_other = fem.dirichletbc(u_other, other_dofs, W.sub(0))
+    
+    bcs = [bc_top, bc_other]
+    
+    # Source term
+    f = ufl.as_vector((0.0, 0.0))
+    
+    # Weak form (using standard convection term)
+    F = (
+        nu * ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx
+        + ufl.inner(ufl.dot(ufl.grad(u), u), v) * ufl.dx
+        - ufl.inner(p, ufl.div(v)) * ufl.dx
+        + ufl.inner(ufl.div(u), q) * ufl.dx
+        - ufl.inner(f, v) * ufl.dx
+    )
+    
+    # Initial guess: zero
+    w.x.array[:] = 0.0
+    
+    # Solve nonlinear problem
+    problem = petsc.NonlinearProblem(F, w, bcs=bcs)
+    solver = nls.petsc.NewtonSolver(domain.comm, problem)
+    solver.convergence_criterion = "incremental"
+    solver.rtol = newton_rtol
+    solver.max_it = newton_max_it
+    solver.krylov_solver.setType(PETSc.KSP.Type.GMRES)
+    solver.krylov_solver.getPC().setType(PETSc.PC.Type.LU)
+    
+    n, converged = solver.solve(w)
+    assert converged, "Newton solver did not converge"
+    w.x.scatter_forward()
+    
+    # Extract velocity
+    u_sol = w.sub(0).collapse()
+    
+    # Create evaluation grid (50x50)
+    nx, ny = 50, 50
+    x = np.linspace(0, 1, nx)
+    y = np.linspace(0, 1, ny)
+    X, Y = np.meshgrid(x, y, indexing='ij')
+    points = np.zeros((3, nx * ny))
+    points[0] = X.flatten()
+    points[1] = Y.flatten()
+    
+    # Evaluate velocity magnitude on grid
+    bb_tree = geometry.bb_tree(domain, domain.topology.dim)
+    cell_candidates = geometry.compute_collisions_points(bb_tree, points.T)
+    colliding_cells = geometry.compute_colliding_cells(domain, cell_candidates, points.T)
+    
+    points_on_proc = []
+    cells_on_proc = []
+    eval_map = []
+    for i in range(points.shape[1]):
+        links = colliding_cells.links(i)
+        if len(links) > 0:
+            points_on_proc.append(points.T[i])
+            cells_on_proc.append(links[0])
+            eval_map.append(i)
+    
+    u_values = np.full((points.shape[1], 2), np.nan)
+    if len(points_on_proc) > 0:
+        vals = u_sol.eval(np.array(points_on_proc), np.array(cells_on_proc, dtype=np.int32))
+        u_values[eval_map] = vals
+    
+    u_magnitude = np.linalg.norm(u_values, axis=1).reshape((nx, ny))
+    
+    return {
+        "u": u_magnitude,
+        "solver_info": {
+            "mesh_resolution": mesh_resolution,
+            "element_degree": degree_u,
+            "ksp_type": "gmres",
+            "pc_type": "lu",
+            "rtol": newton_rtol
+        }
+    }

@@ -1,0 +1,153 @@
+import numpy as np
+from mpi4py import MPI
+from dolfinx import mesh, fem, geometry
+from dolfinx.fem import petsc
+import ufl
+from petsc4py import PETSc
+
+ScalarType = PETSc.ScalarType
+
+def solve(case_spec: dict) -> dict:
+    # Extract parameters from case_spec
+    source_term = case_spec.get("source_term", "sin(5*pi*x)*sin(3*pi*y) + 0.5*sin(9*pi*x)*sin(7*pi*y)")
+    epsilon = case_spec.get("epsilon", 1.0)
+    reaction_alpha = case_spec.get("reaction_alpha", 1.0)
+    
+    # Determine if transient or steady
+    is_transient = "time" in case_spec
+    if is_transient:
+        T = case_spec["time"]["T"]
+        dt = case_spec["time"]["dt"]
+        num_steps = int(T / dt)
+    else:
+        T = None
+        dt = None
+        num_steps = 0
+    
+    # Set up mesh and function space
+    comm = MPI.COMM_WORLD
+    mesh_resolution = 64
+    element_degree = 2
+    domain = mesh.create_unit_square(comm, mesh_resolution, mesh_resolution, cell_type=mesh.CellType.triangle)
+    V = fem.functionspace(domain, ("Lagrange", element_degree))
+    
+    # Define boundary condition (u = 0 on all boundaries)
+    def boundary_marker(x):
+        return np.logical_or.reduce((
+            np.isclose(x[0], 0.0),
+            np.isclose(x[0], 1.0),
+            np.isclose(x[1], 0.0),
+            np.isclose(x[1], 1.0)
+        ))
+    
+    dofs = fem.locate_dofs_geometrical(V, boundary_marker)
+    u_bc = fem.Function(V)
+    u_bc.interpolate(lambda x: np.zeros_like(x[0]))
+    bc = fem.dirichletbc(u_bc, dofs)
+    
+    # Define source term f
+    x = ufl.SpatialCoordinate(domain)
+    f_expr = ufl.sin(5*ufl.pi*x[0])*ufl.sin(3*ufl.pi*x[1]) + 0.5*ufl.sin(9*ufl.pi*x[0])*ufl.sin(7*ufl.pi*x[1])
+    f = fem.Expression(f_expr, V.element.interpolation_points)
+    
+    # Create function for source term
+    f_func = fem.Function(V)
+    f_func.interpolate(f)
+    
+    # Define reaction term R(u) = alpha * u (linear reaction)
+    alpha = reaction_alpha
+    
+    if is_transient:
+        # Transient problem: ∂u/∂t - ε ∇²u + α u = f
+        u_n = fem.Function(V)
+        u_n.interpolate(lambda x: np.zeros_like(x[0]))  # Initial condition u0 = 0
+        
+        u = ufl.TrialFunction(V)
+        v = ufl.TestFunction(V)
+        
+        # Time stepping parameters
+        dt_const = fem.Constant(domain, ScalarType(dt))
+        eps = fem.Constant(domain, ScalarType(epsilon))
+        alpha_const = fem.Constant(domain, ScalarType(alpha))
+        
+        # Weak form for backward Euler
+        F = (u - u_n) / dt_const * v * ufl.dx + eps * ufl.dot(ufl.grad(u), ufl.grad(v)) * ufl.dx + alpha_const * u * v * ufl.dx - f_func * v * ufl.dx
+        a = ufl.lhs(F)
+        L = ufl.rhs(F)
+        
+        # Solver setup
+        problem = petsc.LinearProblem(
+            a, L, bcs=[bc],
+            petsc_options={
+                "ksp_type": "preonly",
+                "pc_type": "lu",
+                "pc_factor_mat_solver_type": "mumps"
+            },
+            petsc_options_prefix="reaction_diffusion_"
+        )
+        
+        u_sol = fem.Function(V)
+        for _ in range(num_steps):
+            u_sol = problem.solve()
+            u_n.x.array[:] = u_sol.x.array[:]
+    else:
+        # Steady problem: -ε ∇²u + α u = f
+        u = ufl.TrialFunction(V)
+        v = ufl.TestFunction(V)
+        eps = fem.Constant(domain, ScalarType(epsilon))
+        alpha_const = fem.Constant(domain, ScalarType(alpha))
+        
+        a = eps * ufl.dot(ufl.grad(u), ufl.grad(v)) * ufl.dx + alpha_const * u * v * ufl.dx
+        L = f_func * v * ufl.dx
+        
+        # Solve linear problem
+        problem = petsc.LinearProblem(
+            a, L, bcs=[bc],
+            petsc_options={
+                "ksp_type": "preonly",
+                "pc_type": "lu",
+                "pc_factor_mat_solver_type": "mumps"
+            },
+            petsc_options_prefix="reaction_diffusion_"
+        )
+        u_sol = problem.solve()
+    
+    # Evaluate solution on 80x80 grid
+    nx, ny = 80, 80
+    x_points = np.linspace(0, 1, nx)
+    y_points = np.linspace(0, 1, ny)
+    X, Y = np.meshgrid(x_points, y_points, indexing='ij')
+    points = np.vstack((X.ravel(), Y.ravel(), np.zeros_like(X.ravel())))
+    
+    # Use bounding box tree to evaluate
+    bb_tree = geometry.bb_tree(domain, domain.topology.dim)
+    cells = []
+    points_on_proc = []
+    for i, point in enumerate(points.T):
+        cell_candidates = geometry.compute_collisions_points(bb_tree, point.reshape(1, 3))
+        colliding_cells = geometry.compute_colliding_cells(domain, cell_candidates, point.reshape(1, 3))
+        if len(colliding_cells.links(0)) > 0:
+            cells.append(colliding_cells.links(0)[0])
+            points_on_proc.append(point)
+    
+    u_values = np.full((nx * ny,), np.nan)
+    if len(points_on_proc) > 0:
+        u_eval = u_sol.eval(points_on_proc, cells)
+        u_values[:len(u_eval)] = u_eval.flatten()
+    
+    # Reshape to (nx, ny)
+    u_grid = u_values.reshape((nx, ny))
+    
+    # Return results
+    solver_info = {
+        "mesh_resolution": mesh_resolution,
+        "element_degree": element_degree,
+        "ksp_type": "preonly",
+        "pc_type": "lu",
+        "rtol": 1e-12
+    }
+    
+    return {
+        "u": u_grid,
+        "solver_info": solver_info
+    }

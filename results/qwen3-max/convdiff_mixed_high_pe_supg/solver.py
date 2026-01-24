@@ -1,0 +1,122 @@
+import numpy as np
+from mpi4py import MPI
+from dolfinx import mesh, fem, geometry
+from dolfinx.fem import petsc
+import ufl
+from petsc4py import PETSc
+
+ScalarType = PETSc.ScalarType
+
+def solve(case_spec: dict) -> dict:
+    # Extract parameters from case_spec with defaults
+    stabilization = case_spec.get("stabilization", "supg")
+    upwind_parameter = case_spec.get("upwind_parameter", 1.0)
+    mesh_resolution = case_spec.get("mesh_resolution", 64)
+    element_degree = case_spec.get("element_degree", 2)
+    ksp_type = case_spec.get("ksp_type", "gmres")
+    
+    comm = MPI.COMM_WORLD
+    domain = mesh.create_unit_square(comm, mesh_resolution, mesh_resolution, cell_type=mesh.CellType.triangle)
+    
+    V = fem.functionspace(domain, ("Lagrange", element_degree))
+    
+    # Exact solution for boundary conditions
+    x = ufl.SpatialCoordinate(domain)
+    u_exact_expr = ufl.sin(ufl.pi * x[0]) * ufl.sin(ufl.pi * x[1])
+    
+    # Boundary condition
+    u_bc = fem.Function(V)
+    u_bc.interpolate(lambda x: np.sin(np.pi * x[0]) * np.sin(np.pi * x[1]))
+    dofs = fem.locate_dofs_geometrical(V, lambda x: np.full(x.shape[1], True, dtype=bool))
+    bc = fem.dirichletbc(u_bc, dofs)
+    
+    # Parameters
+    eps_val = 0.005
+    beta_val = [20.0, 10.0]
+    eps = fem.Constant(domain, ScalarType(eps_val))
+    beta = fem.Constant(domain, (ScalarType(beta_val[0]), ScalarType(beta_val[1])))
+    
+    # Source term derived from exact solution
+    grad_u_exact = ufl.as_vector([ufl.pi * ufl.cos(ufl.pi * x[0]) * ufl.sin(ufl.pi * x[1]),
+                                  ufl.pi * ufl.sin(ufl.pi * x[0]) * ufl.cos(ufl.pi * x[1])])
+    laplacian_u_exact = -2 * ufl.pi**2 * ufl.sin(ufl.pi * x[0]) * ufl.sin(ufl.pi * x[1])
+    f_expr = -eps_val * laplacian_u_exact + beta_val[0] * grad_u_exact[0] + beta_val[1] * grad_u_exact[1]
+    f = fem.Constant(domain, ScalarType(f_expr))
+    
+    # Trial and test functions
+    u = ufl.TrialFunction(V)
+    v = ufl.TestFunction(V)
+    
+    # Standard Galerkin terms
+    a = eps * ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx + ufl.inner(beta, ufl.grad(u)) * v * ufl.dx
+    L = f * v * ufl.dx
+    
+    # SUPG stabilization
+    if stabilization == "supg":
+        h = ufl.CellDiameter(domain)
+        Pe = ufl.sqrt(ufl.dot(beta, beta)) * h / (2.0 * eps)
+        tau = ufl.conditional(
+            ufl.gt(Pe, 1.0),
+            upwind_parameter * h / (2.0 * ufl.sqrt(ufl.dot(beta, beta))) * (1.0 - ufl.exp(-2.0 * Pe)),
+            0.0
+        )
+        # Residual of the strong form
+        residual = -eps * ufl.div(ufl.grad(u)) + ufl.dot(beta, ufl.grad(u)) - f
+        a += tau * ufl.dot(beta, ufl.grad(v)) * residual * ufl.dx
+        L += tau * ufl.dot(beta, ufl.grad(v)) * f * ufl.dx
+    
+    # Solve using LinearProblem
+    problem = petsc.LinearProblem(
+        a, L, bcs=[bc],
+        petsc_options={
+            "ksp_type": ksp_type,
+            "pc_type": "ilu",
+            "ksp_rtol": 1e-8
+        },
+        petsc_options_prefix="convdiff_"
+    )
+    u_sol = problem.solve()
+    
+    # Create evaluation grid
+    nx, ny = 50, 50
+    x_eval = np.linspace(0, 1, nx)
+    y_eval = np.linspace(0, 1, ny)
+    X, Y = np.meshgrid(x_eval, y_eval, indexing='ij')
+    points = np.zeros((3, nx * ny))
+    points[0] = X.flatten()
+    points[1] = Y.flatten()
+    
+    # Evaluate solution on grid
+    bb_tree = geometry.bb_tree(domain, domain.topology.dim)
+    cell_candidates = geometry.compute_collisions_points(bb_tree, points.T)
+    colliding_cells = geometry.compute_colliding_cells(domain, cell_candidates, points.T)
+    
+    points_on_proc = []
+    cells_on_proc = []
+    eval_map = []
+    for i in range(points.shape[1]):
+        links = colliding_cells.links(i)
+        if len(links) > 0:
+            points_on_proc.append(points.T[i])
+            cells_on_proc.append(links[0])
+            eval_map.append(i)
+    
+    u_values = np.full((points.shape[1],), np.nan)
+    if len(points_on_proc) > 0:
+        vals = u_sol.eval(np.array(points_on_proc), np.array(cells_on_proc, dtype=np.int32))
+        u_values[eval_map] = vals.flatten()
+    
+    u_grid = u_values.reshape((nx, ny))
+    
+    solver_info = {
+        "mesh_resolution": mesh_resolution,
+        "element_degree": element_degree,
+        "ksp_type": ksp_type,
+        "pc_type": "ilu",
+        "rtol": 1e-8
+    }
+    
+    return {
+        "u": u_grid,
+        "solver_info": solver_info
+    }
