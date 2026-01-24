@@ -17,13 +17,16 @@ dependencies = [
     "openai>=2.13",
     "boto3>=1.42",
     "google-genai>=1.59",
+]
+
+[project.optional-dependencies]
+fenicsx = [
+    # 安装命令: conda install -c conda-forge fenics-dolfinx=0.10.0
     "fenics-dolfinx>=0.10.0",
     "fenics-ufl>=2025.2.0",
     "mpi4py>=4.1.1",
     "petsc4py>=3.24.2",
 ]
-
-[project.optional-dependencies]
 dev = [
     "pytest>=7.0",
     "pytest-xdist>=2.5",
