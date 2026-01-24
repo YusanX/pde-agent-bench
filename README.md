@@ -26,7 +26,7 @@ conda activate pdebench
 conda install -c conda-forge fenics-dolfinx=0.10.0 mpich petsc4py
 
 # 安装 PDEBench
-cd pdebench
+cd pde-agent-bench
 pip install -e .
 ```
 
