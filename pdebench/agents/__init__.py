@@ -20,15 +20,10 @@ from .base_agent import BaseAgent, AgentResponse
 from .agent_registry import AgentRegistry, get_agent
 
 # 导入所有 agent wrappers
-from .swe_agent_wrapper import SWEAgentWrapper
-from .openhands_wrapper import OpenhandsWrapper
-from .qwen_agent_wrapper import QwenAgentWrapper
+
 from .codepde_wrapper import CodePDEWrapper
 
 # 注册所有 Agent
-AgentRegistry.register('swe-agent', SWEAgentWrapper)
-AgentRegistry.register('openhands', OpenhandsWrapper)
-AgentRegistry.register('qwen-agent', QwenAgentWrapper)
 AgentRegistry.register('codepde', CodePDEWrapper)
 
 # 导出
@@ -37,8 +32,5 @@ __all__ = [
     'AgentResponse',
     'AgentRegistry',
     'get_agent',
-    'SWEAgentWrapper',
-    'OpenhandsWrapper',
-    'QwenAgentWrapper',
     'CodePDEWrapper',
 ]
