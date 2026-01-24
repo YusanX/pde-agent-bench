@@ -21,13 +21,13 @@ PDEBench 评估 AI Agent 是否能"像计算科学家一样思考"：
 
 ```bash
 # 创建 conda 环境并安装 FEniCSx
-conda create -n pdebench python=3.10
+conda create -n pdebench python=3.11
 conda activate pdebench
 conda install -c conda-forge fenics-dolfinx=0.10.0 mpich petsc4py
 
 # 安装 PDEBench
 cd pdebench
-pip install -e ".[dev]"
+pip install -e .
 ```
 
 ### 2. 评测你的 Agent
