@@ -145,6 +145,9 @@ def _build_dirichlet_bcs(msh, V, bc_cfg: Any, u_exact: fem.Function | None, dim:
 
 class LinearElasticitySolver:
     def solve(self, case_spec: Dict[str, Any]) -> OracleResult:
+        # ⏱️ 开始计时整个求解流程
+        t_start_total = time.perf_counter()
+        
         msh = create_mesh(case_spec["domain"], case_spec["mesh"])
         dim = msh.geometry.dim
         if dim != 2:
@@ -241,9 +244,7 @@ class LinearElasticitySolver:
             petsc_options_prefix="oracle_linear_elasticity_",
         )
 
-        t_start = time.perf_counter()
         u_h = problem.solve()
-        baseline_time = time.perf_counter() - t_start
 
         grid_cfg = case_spec["output"]["grid"]
         _, _, u_mag = sample_vector_magnitude_on_grid(
@@ -314,6 +315,9 @@ class LinearElasticitySolver:
             u_mag = ref_mag
             solver_info["reference_resolution"] = ref_mesh_spec.get("resolution")
             solver_info["reference_degree"] = ref_fem_spec.get("degree")
+
+        # ⏱️ 结束计时（包含完整流程）
+        baseline_time = time.perf_counter() - t_start_total
 
         return OracleResult(
             baseline_error=float(baseline_error),

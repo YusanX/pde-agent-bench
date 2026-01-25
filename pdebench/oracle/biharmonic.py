@@ -50,6 +50,9 @@ class BiharmonicSolver:
     """Oracle solver for biharmonic equation using two Poisson solves."""
 
     def solve(self, case_spec: Dict[str, Any]) -> OracleResult:
+        # ⏱️ 开始计时整个求解流程
+        t_start_total = time.perf_counter()
+        
         msh = create_mesh(case_spec["domain"], case_spec["mesh"])
         V = create_scalar_space(msh, case_spec["fem"]["family"], case_spec["fem"]["degree"])
 
@@ -111,7 +114,6 @@ class BiharmonicSolver:
             petsc_options_prefix="oracle_biharmonic_w_",
         )
 
-        t_start = time.perf_counter()
         w_h = w_problem.solve()
 
         # -----------------------
@@ -138,7 +140,6 @@ class BiharmonicSolver:
             petsc_options_prefix="oracle_biharmonic_u_",
         )
         u_h = u_problem.solve()
-        baseline_time = time.perf_counter() - t_start
 
         grid_cfg = case_spec["output"]["grid"]
         _, _, u_grid = sample_scalar_on_grid(u_h, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"])
@@ -213,6 +214,9 @@ class BiharmonicSolver:
             u_grid = ref_grid
             solver_info["reference_resolution"] = ref_mesh_spec.get("resolution")
             solver_info["reference_degree"] = ref_fem_spec.get("degree")
+
+        # ⏱️ 结束计时（包含完整流程）
+        baseline_time = time.perf_counter() - t_start_total
 
         return OracleResult(
             baseline_error=float(baseline_error),

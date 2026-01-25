@@ -210,9 +210,41 @@ Write a Python module using **dolfinx** (FEniCSx) that exposes:
 def solve(case_spec: dict) -> dict:
     \"\"\"
     Return a dict with:
-    - "u": u_grid, numpy array with shape (nx, ny)
-    - "solver_info": required fields:
-        mesh_resolution, element_degree, ksp_type, pc_type, rtol
+    - "u": u_grid, numpy array with shape (nx, ny) - final solution
+    - "solver_info": dict with fields organized by PDE type:
+    
+      ALWAYS REQUIRED (all PDEs):
+        - mesh_resolution (int): spatial mesh resolution (e.g., 64, 128)
+        - element_degree (int): polynomial degree (1, 2, 3, ...)
+        - ksp_type (str): linear solver type (e.g., 'cg', 'gmres')
+        - pc_type (str): preconditioner type (e.g., 'jacobi', 'ilu', 'hypre')
+        - rtol (float): relative tolerance for linear solver
+      
+      REQUIRED if you perform LINEAR solves (record actual solver behavior):
+        - iterations (int): total linear solver iterations across all solves
+      
+      REQUIRED if PDE contains TIME (check case_spec['pde']['time']):
+        - dt (float): time step size you used (e.g., 0.01)
+        - n_steps (int): number of time steps you actually computed (e.g., 50)
+        - time_scheme (str): time integrator you used ('backward_euler', 'crank_nicolson', or 'bdf2')
+        
+        Example for transient PDE:
+          "solver_info": {{
+            "mesh_resolution": 120, "element_degree": 1,
+            "ksp_type": "gmres", "pc_type": "ilu", "rtol": 1e-8,
+            "iterations": 450,  # sum of all linear iterations
+            "dt": 0.01, "n_steps": 50, "time_scheme": "backward_euler"
+          }}
+      
+      REQUIRED if PDE is NONLINEAR (e.g., reaction terms like u^3 or u(1-u)):
+        - nonlinear_iterations (list of int): Newton iterations per time step
+          (for steady: single value in list; for transient: one per time step)
+        
+        Example for nonlinear transient:
+          "nonlinear_iterations": [5, 4, 4, 3, ...]  # one per time step
+    
+    ADDITIONALLY for time-dependent PDEs (highly recommended for analysis):
+    - "u_initial": initial condition array, same shape as u (enables front propagation tracking)
     \"\"\"
 ```
 
@@ -220,6 +252,7 @@ Notes:
 1. Do NOT write files (no solution.npz / meta.json).
 2. Evaluator will time your solve() call and write outputs.
 3. You decide mesh resolution, element degree, solver, etc., but must report them in solver_info.
+4. Optional fields help compute specialized metrics (e.g., CFL number, workrate, Newton convergence).
 """
 
     # 添加Agent参数暴露

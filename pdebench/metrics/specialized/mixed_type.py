@@ -94,9 +94,11 @@ class MixedTypeMetricsComputer(SpecializedMetricsComputer):
             with open(meta_file) as f:
                 meta = json.load(f)
             
+            # PRIMARY: Read from solver_info field (new unified location)
             if 'solver_info' in meta:
                 si = meta['solver_info']
                 if isinstance(si, dict):
+                    # Stabilization method (for mixed-type convection-diffusion)
                     if 'stabilization' in si:
                         solver_info['stabilization_method'] = si['stabilization']
                     if 'upwind_parameter' in si:

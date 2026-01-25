@@ -129,6 +129,9 @@ class DarcySolver:
     """Oracle solver for Darcy flow."""
 
     def solve(self, case_spec: Dict[str, Any]) -> OracleResult:
+        # ⏱️ 开始计时整个求解流程
+        t_start_total = time.perf_counter()
+        
         msh = create_mesh(case_spec["domain"], case_spec["mesh"])
         if msh.geometry.dim != 2:
             raise ValueError("Darcy oracle currently supports 2D unit_square cases only.")
@@ -199,9 +202,7 @@ class DarcySolver:
                 petsc_options=petsc_options,
                 petsc_options_prefix="oracle_darcy_elliptic_",
             )
-            t0 = time.perf_counter()
             p_h = problem.solve()
-            baseline_time = time.perf_counter() - t0
 
             if output_field == "pressure":
                 _, _, out_grid = sample_scalar_on_grid(
@@ -226,6 +227,9 @@ class DarcySolver:
                 )
                 baseline_error = compute_rel_L2_grid(out_grid, p_exact_grid)
                 out_grid = p_exact_grid
+
+            # ⏱️ 结束计时（椭圆型情况）
+            baseline_time = time.perf_counter() - t_start_total
 
             solver_info = {
                 "formulation": "elliptic",
@@ -308,9 +312,7 @@ class DarcySolver:
                 petsc_options=petsc_options,
                 petsc_options_prefix="oracle_darcy_mixed_",
             )
-            t0 = time.perf_counter()
             w_h = problem.solve()
-            baseline_time = time.perf_counter() - t0
 
             # Enforce solver success explicitly (otherwise we may silently return a garbage vector).
             if problem.solver.getConvergedReason() <= 0:
@@ -341,6 +343,9 @@ class DarcySolver:
                 out_grid = u_exact_grid
             else:
                 raise ValueError(f"Unsupported Darcy output field: {output_field}")
+
+            # ⏱️ 结束计时（混合形式）
+            baseline_time = time.perf_counter() - t_start_total
 
             solver_info = {
                 "formulation": "mixed",

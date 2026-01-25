@@ -29,22 +29,55 @@ class ReactionDiffusionMetricsComputer(SpecializedMetricsComputer):
         metrics = {}
         
         try:
-            # 1. Read meta.json for nonlinear solver info
+            # 1. Read meta.json
             meta_file = self.agent_output_dir / 'meta.json'
             if meta_file.exists():
                 with open(meta_file) as f:
                     meta = json.load(f)
                 
-                # Nonlinear iterations
-                if 'nonlinear_solver' in meta:
+                # PRIMARY: Read from solver_info field (new unified location)
+                solver_info = meta.get('solver_info', {})
+                
+                # Basic solver info (always available for steady problems)
+                if 'mesh_resolution' in solver_info:
+                    metrics['mesh_resolution'] = int(solver_info['mesh_resolution'])
+                if 'element_degree' in solver_info:
+                    metrics['element_degree'] = int(solver_info['element_degree'])
+                
+                # Linear solver iterations (for steady linear problems)
+                if 'iterations' in solver_info:
+                    iterations = solver_info['iterations']
+                    if isinstance(iterations, (int, float)):
+                        metrics['linear_iterations'] = int(iterations)
+                    elif isinstance(iterations, list):
+                        metrics['linear_iterations_mean'] = float(np.mean(iterations))
+                        metrics['linear_iterations_max'] = int(np.max(iterations))
+                
+                # Nonlinear iterations (for reaction-diffusion with Newton)
+                if 'nonlinear_iterations' in solver_info:
+                    nl_iters = solver_info['nonlinear_iterations']
+                    if isinstance(nl_iters, list) and len(nl_iters) > 0:
+                        metrics['newton_iterations_mean'] = float(np.mean(nl_iters))
+                        metrics['newton_iterations_max'] = int(np.max(nl_iters))
+                
+                # FALLBACK: Read from legacy nonlinear_solver field (backward compatibility)
+                if 'nonlinear_solver' in meta and 'newton_iterations_mean' not in metrics:
                     ns = meta['nonlinear_solver']
                     if isinstance(ns, dict) and 'iterations' in ns:
                         iters = ns['iterations']
-                        if isinstance(iters, list):
+                        if isinstance(iters, list) and len(iters) > 0:
                             metrics['newton_iterations_mean'] = float(np.mean(iters))
                             metrics['newton_iterations_max'] = int(np.max(iters))
                 
-            # 2. Front propagation speed
+                # Time stepping info (for transient reaction-diffusion)
+                if 'dt' in solver_info:
+                    metrics['dt'] = float(solver_info['dt'])
+                if 'n_steps' in solver_info:
+                    metrics['n_steps'] = int(solver_info['n_steps'])
+                if 'time_scheme' in solver_info:
+                    metrics['time_integrator'] = solver_info['time_scheme']
+            
+            # 2. Front propagation speed (optional, requires u_initial.npy and u.npy)
             u0_file = self.agent_output_dir / 'u_initial.npy'
             u_final_file = self.agent_output_dir / 'u.npy'
             
@@ -57,10 +90,13 @@ class ReactionDiffusionMetricsComputer(SpecializedMetricsComputer):
                 if front_speed is not None:
                     metrics['front_propagation_speed'] = float(front_speed)
             
-            # Read solver information
-            solver_info = self._read_solver_info()
-            if solver_info:
-                metrics.update(solver_info)
+            # Read additional solver information
+            solver_info_extra = self._read_solver_info()
+            if solver_info_extra:
+                # Merge without overwriting existing keys
+                for k, v in solver_info_extra.items():
+                    if k not in metrics:
+                        metrics[k] = v
             
         except Exception as e:
             metrics['error'] = f"Failed to compute reaction-diffusion metrics: {str(e)}"
@@ -105,11 +141,13 @@ class ReactionDiffusionMetricsComputer(SpecializedMetricsComputer):
             with open(meta_file) as f:
                 meta = json.load(f)
             
+            # PRIMARY: Read from solver_info field
             if 'solver_info' in meta:
                 si = meta['solver_info']
                 if isinstance(si, dict):
                     if 'time_scheme' in si:
                         solver_info['time_integrator'] = si['time_scheme']
+                    # nonlinear_method could be a new optional field
                     if 'nonlinear_method' in si:
                         solver_info['nonlinear_method'] = si['nonlinear_method']
             

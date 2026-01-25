@@ -28,6 +28,9 @@ class HeatSolver:
     """Backward-Euler heat equation solver for oracle ground truth."""
 
     def solve(self, case_spec: Dict[str, Any]) -> OracleResult:
+        # ⏱️ 开始计时整个求解流程
+        t_start_total = time.perf_counter()
+        
         msh = create_mesh(case_spec["domain"], case_spec["mesh"])
         V = create_scalar_space(msh, case_spec["fem"]["family"], case_spec["fem"]["degree"])
 
@@ -108,7 +111,6 @@ class HeatSolver:
             "ksp_atol": solver_params.get("atol", 1e-12),
         }
 
-        total_time = 0.0
         t = t0
 
         for _ in range(num_steps):
@@ -129,9 +131,7 @@ class HeatSolver:
                 petsc_options=petsc_options,
                 petsc_options_prefix="oracle_heat_",
             )
-            t_start = time.perf_counter()
             u_new = problem.solve()
-            total_time += time.perf_counter() - t_start
             u_prev.x.array[:] = u_new.x.array
 
         grid_cfg = case_spec["output"]["grid"]
@@ -226,9 +226,12 @@ class HeatSolver:
             "dt": dt,
         }
 
+        # ⏱️ 结束计时（包含完整流程）
+        baseline_time = time.perf_counter() - t_start_total
+
         return OracleResult(
             baseline_error=float(baseline_error),
-            baseline_time=float(total_time),
+            baseline_time=float(baseline_time),
             reference=u_grid,
             solver_info=solver_info,
             num_dofs=V.dofmap.index_map.size_global,

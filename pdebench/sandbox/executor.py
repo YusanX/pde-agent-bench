@@ -269,6 +269,20 @@ def main():
     x = np.linspace(grid["bbox"][0], grid["bbox"][1], nx)
     y = np.linspace(grid["bbox"][2], grid["bbox"][3], ny)
     np.savez(f"{{args.outdir}}/solution.npz", x=x, y=y, u=u_grid)
+    
+    # Save u.npy for specialized metrics (e.g., front propagation speed)
+    np.save(f"{{args.outdir}}/u.npy", u_grid)
+    
+    # Save u_initial.npy if provided (for time-dependent problems)
+    u_initial = result.get("u_initial")
+    if u_initial is not None:
+        u_initial = np.array(u_initial)
+        # Ensure same shape as u_grid
+        if u_initial.ndim == 1 and u_initial.size == nx * ny:
+            u_initial = u_initial.reshape((nx, ny))
+        if u_initial.shape != (nx, ny):
+            raise ValueError(f"u_initial shape {{u_initial.shape}} does not match u shape ({{nx}}, {{ny}})")
+        np.save(f"{{args.outdir}}/u_initial.npy", u_initial)
 
     meta = {{
         "wall_time_sec": t1 - t0,

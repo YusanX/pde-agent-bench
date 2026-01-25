@@ -27,6 +27,9 @@ class ConvectionDiffusionSolver:
     """Convection-diffusion solver with optional SUPG stabilization."""
 
     def solve(self, case_spec: Dict[str, Any]) -> OracleResult:
+        # ⏱️ 开始计时整个求解流程
+        t_start_total = time.perf_counter()
+        
         msh = create_mesh(case_spec["domain"], case_spec["mesh"])
         V = create_scalar_space(msh, case_spec["fem"]["family"], case_spec["fem"]["degree"])
 
@@ -100,9 +103,7 @@ class ConvectionDiffusionSolver:
                 petsc_options=petsc_options,
                 petsc_options_prefix="oracle_convdiff_",
             )
-            t_start = time.perf_counter()
             u_h = problem.solve()
-            baseline_time = time.perf_counter() - t_start
 
             grid_cfg = case_spec["output"]["grid"]
             _, _, u_grid = sample_scalar_on_grid(
@@ -163,6 +164,9 @@ class ConvectionDiffusionSolver:
                 u_grid = ref_grid
                 solver_info["reference_resolution"] = ref_mesh_spec.get("resolution")
                 solver_info["reference_degree"] = ref_fem_spec.get("degree")
+
+            # ⏱️ 结束计时（稳态情况）
+            baseline_time = time.perf_counter() - t_start_total
 
             return OracleResult(
                 baseline_error=float(baseline_error),
@@ -258,9 +262,7 @@ class ConvectionDiffusionSolver:
                 petsc_options=petsc_options,
                 petsc_options_prefix="oracle_convdiff_",
             )
-            t_start = time.perf_counter()
             u_new = problem.solve()
-            total_time += time.perf_counter() - t_start
             u_prev.x.array[:] = u_new.x.array
 
         grid_cfg = case_spec["output"]["grid"]
@@ -368,9 +370,12 @@ class ConvectionDiffusionSolver:
             solver_info["reference_resolution"] = ref_mesh_spec.get("resolution")
             solver_info["reference_degree"] = ref_fem_spec.get("degree")
 
+        # ⏱️ 结束计时（瞬态情况）
+        baseline_time = time.perf_counter() - t_start_total
+
         return OracleResult(
             baseline_error=float(baseline_error),
-            baseline_time=float(total_time),
+            baseline_time=float(baseline_time),
             reference=u_grid,
             solver_info=solver_info,
             num_dofs=V.dofmap.index_map.size_global,

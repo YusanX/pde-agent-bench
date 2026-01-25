@@ -29,6 +29,9 @@ class PoissonSolver:
     """Poisson equation solver for oracle ground truth."""
 
     def solve(self, case_spec: Dict[str, Any]) -> OracleResult:
+        # ⏱️ 开始计时整个求解流程（包括网格生成、函数空间构建、求解、采样）
+        t_start = time.perf_counter()
+        
         msh = create_mesh(case_spec["domain"], case_spec["mesh"])
         V = create_scalar_space(
             msh, case_spec["fem"]["family"], case_spec["fem"]["degree"]
@@ -97,9 +100,7 @@ class PoissonSolver:
             petsc_options_prefix="oracle_poisson_",
         )
 
-        t_start = time.perf_counter()
         u_h = problem.solve()
-        baseline_time = time.perf_counter() - t_start
 
         grid_cfg = case_spec["output"]["grid"]
         _, _, u_grid = sample_scalar_on_grid(
@@ -156,6 +157,9 @@ class PoissonSolver:
             u_grid = ref_grid
             solver_info["reference_resolution"] = ref_mesh_spec.get("resolution")
             solver_info["reference_degree"] = ref_fem_spec.get("degree")
+
+        # ⏱️ 结束计时（包含完整流程）
+        baseline_time = time.perf_counter() - t_start
 
         return OracleResult(
             baseline_error=float(baseline_error),

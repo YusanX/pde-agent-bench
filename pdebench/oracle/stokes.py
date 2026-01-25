@@ -118,6 +118,9 @@ class StokesSolver:
     """Taylor-Hood mixed solver for Stokes."""
 
     def solve(self, case_spec: Dict[str, Any]) -> OracleResult:
+        # ⏱️ 开始计时整个求解流程
+        t_start_total = time.perf_counter()
+        
         msh = create_mesh(case_spec["domain"], case_spec["mesh"])
         dim = msh.geometry.dim
         degree_u = case_spec["fem"].get("degree_u", 2)
@@ -240,12 +243,10 @@ class StokesSolver:
             "ksp_rtol": solver_params.get("rtol", 1e-10),
         }
 
-        baseline_time = time.time()
         problem = LinearProblem(
             a, L, bcs=bcs, petsc_options=petsc_options, petsc_options_prefix="oracle_stokes_"
         )
         w_h = problem.solve()
-        baseline_time = time.time() - baseline_time
 
         u_h = w_h.sub(0).collapse()
         p_h = w_h.sub(1).collapse()
@@ -359,6 +360,9 @@ class StokesSolver:
             solver_info["reference_resolution"] = ref_mesh_spec.get("resolution")
             solver_info["reference_degree_u"] = ref_fem_spec.get("degree_u", degree_u)
             solver_info["reference_degree_p"] = ref_fem_spec.get("degree_p", degree_p)
+
+        # ⏱️ 结束计时（包含完整流程）
+        baseline_time = time.perf_counter() - t_start_total
 
         return OracleResult(
             baseline_error=float(baseline_error),

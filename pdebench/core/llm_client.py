@@ -59,28 +59,23 @@ class LLMClient:
         'haiku': {'provider': 'anthropic', 'model': 'anthropic.claude-3-haiku-20240307-v1:0'},
         'gemini': {'provider': 'google', 'model': 'gemini-3.0-pro'},
         'gemini-3.0-pro': {'provider': 'google', 'model': 'gemini-3.0-pro'},  # 实验 1.1 别名
-        'qwen3-max': {'provider': 'qwen', 'model': 'qwen3-max'},  # 千问最强版本
+        'qwen3-max': {'provider': 'qwen', 'model': 'qwen3-max-2025-09-23'},  
     }
     
     # 定价信息（USD per 1M tokens）- 实验 4.6 成本追踪
     PRICING = {
         # OpenAI
-        'gpt-4o': {'input': 2.50, 'output': 10.00},
-        'gpt-4o-mini': {'input': 0.15, 'output': 0.60},
-        'gpt-5.1': {'input': 5.00, 'output': 15.00},  # 估算
-        'gpt-5.2': {'input': 5.00, 'output': 15.00},  # 估算
+        'gpt-5.2': {'input': 1.75, 'output': 14.00}, 
         'o3-mini': {'input': 1.10, 'output': 4.40},
         
         # Anthropic
-        'sonnet-3.5': {'input': 3.00, 'output': 15.00},
-        'sonnet-3.6': {'input': 3.00, 'output': 15.00},
-        'claude-opus-4.5': {'input': 15.00, 'output': 75.00},  # 估算
-        'haiku': {'input': 0.25, 'output': 1.25},
+        'sonnet-3.5': {'input': 3.00, 'output': 6.00},
+        'claude-opus-4.5': {'input': 5.00, 'output': 25.00},  # 估算
+        'haiku': {'input': 1, 'output': 5},
         
         # Google
-        'gemini': {'input': 0.075, 'output': 0.30},
-        'gemini-3.0-pro': {'input': 0.075, 'output': 0.30},
-        
+        'gemini-3.0-pro': {'input': 2, 'output': 12},
+        # Qwen 
         'qwen3-max': {'input': 1.2, 'output': 6},
     }
     

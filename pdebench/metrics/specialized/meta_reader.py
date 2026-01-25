@@ -15,6 +15,8 @@ def read_agent_meta(agent_output_dir: Path) -> Dict[str, Any]:
     
     Returns a flattened dictionary with:
     - Common parameters (mesh_resolution, element_degree, ksp_type, pc_type)
+    - Time stepping (dt, n_steps, time_scheme) from solver_info
+    - Iterations (iterations, nonlinear_iterations) from solver_info
     - PDE-specific parameters (nested under 'pde_specific')
     
     Args:
@@ -28,6 +30,11 @@ def read_agent_meta(agent_output_dir: Path) -> Dict[str, Any]:
         'element_degree': None,
         'ksp_type': 'unknown',
         'pc_type': 'unknown',
+        'dt': None,
+        'n_steps': None,
+        'time_scheme': 'unknown',
+        'iterations': None,
+        'nonlinear_iterations': None,
         'pde_specific': {}
     }
     
@@ -47,10 +54,18 @@ def read_agent_meta(agent_output_dir: Path) -> Dict[str, Any]:
         meta_data['element_family'] = solver_info.get('element_family', 'Lagrange')
         meta_data['ksp_type'] = solver_info.get('ksp_type', 'unknown')
         meta_data['pc_type'] = solver_info.get('pc_type', 'unknown')
+        
+        # Extract time stepping parameters (new unified location)
+        meta_data['dt'] = solver_info.get('dt')
+        meta_data['n_steps'] = solver_info.get('n_steps')
+        meta_data['time_scheme'] = solver_info.get('time_scheme', 'unknown')
+        
+        # Extract iteration counts (new unified location)
         meta_data['iterations'] = solver_info.get('iterations')
+        meta_data['nonlinear_iterations'] = solver_info.get('nonlinear_iterations')
         meta_data['rationale'] = solver_info.get('rationale', '')
         
-        # Extract PDE-specific parameters
+        # Extract PDE-specific parameters (legacy location, still useful)
         if 'pde_specific' in solver_info:
             meta_data['pde_specific'] = solver_info['pde_specific']
         
@@ -70,26 +85,36 @@ def get_time_stepping_params(
     Extract time-stepping parameters with fallback logic.
     
     Priority:
-    1. agent_meta['pde_specific']['time_stepping'] (autonomous mode)
-    2. result['test_params'] (guided mode, backward compatible)
-    3. oracle_config['pde']['time'] (fallback)
+    1. agent_meta (from solver_info: dt, n_steps, time_scheme)
+    2. agent_meta['pde_specific']['time_stepping'] (legacy autonomous mode)
+    3. result['test_params'] (guided mode, backward compatible)
+    4. oracle_config['pde']['time'] (fallback)
     
     Returns:
         Dictionary with: dt, n_steps, scheme, t_end
     """
     time_params = {}
     
-    # Try agent's pde_specific first (autonomous mode)
-    time_config = agent_meta.get('pde_specific', {}).get('time_stepping', {})
-    dt = time_config.get('dt')
-    n_steps = time_config.get('n_steps')
-    scheme = time_config.get('scheme', 'unknown')
+    # PRIMARY: Try agent's solver_info first (new unified location)
+    dt = agent_meta.get('dt')
+    n_steps = agent_meta.get('n_steps')
+    scheme = agent_meta.get('time_scheme', 'unknown')
     
-    # Fallback to test_params (guided mode)
+    # FALLBACK 1: Try agent's pde_specific (legacy location)
+    if dt is None or n_steps is None:
+        time_config = agent_meta.get('pde_specific', {}).get('time_stepping', {})
+        if dt is None:
+            dt = time_config.get('dt')
+        if n_steps is None:
+            n_steps = time_config.get('n_steps')
+        if scheme == 'unknown':
+            scheme = time_config.get('scheme', 'unknown')
+    
+    # FALLBACK 2: Try test_params (guided mode)
     if dt is None:
         dt = result.get('test_params', {}).get('dt')
     
-    # Fallback to oracle config
+    # FALLBACK 3: Oracle config
     oracle_time = oracle_config.get('pde', {}).get('time', {})
     t_end = oracle_time.get('t_end', 1.0)
     

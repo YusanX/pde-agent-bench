@@ -50,14 +50,37 @@ class IncompressibleFlowMetricsComputer(SpecializedMetricsComputer):
             with open(meta_file) as f:
                 meta = json.load(f)
             
-            # Read linear solver information
+            # PRIMARY: Read from solver_info field (new unified location)
+            if 'solver_info' in meta:
+                si = meta['solver_info']
+                if isinstance(si, dict):
+                    # Linear solver info
+                    if 'ksp_type' in si:
+                        solver_info['linear_solver_type'] = si['ksp_type']
+                    if 'pc_type' in si:
+                        solver_info['preconditioner_type'] = si['pc_type']
+                    # Iterations
+                    if 'iterations' in si:
+                        iterations = si['iterations']
+                        if isinstance(iterations, (int, float)):
+                            solver_info['linear_iterations'] = int(iterations)
+                        elif isinstance(iterations, list):
+                            solver_info['linear_iterations_mean'] = float(np.mean(iterations))
+                            solver_info['linear_iterations_max'] = int(np.max(iterations))
+                    # Block preconditioner (for incompressible flow)
+                    if 'block_preconditioner' in si:
+                        solver_info['block_preconditioner'] = si['block_preconditioner']
+            
+            # FALLBACK: Read from legacy linear_solver field (backward compatibility)
             if 'linear_solver' in meta:
                 ls = meta['linear_solver']
                 if isinstance(ls, dict):
-                    solver_info['linear_solver_type'] = ls.get('type', 'unknown')
-                    solver_info['preconditioner_type'] = ls.get('preconditioner', 'none')
+                    if 'type' in ls and 'linear_solver_type' not in solver_info:
+                        solver_info['linear_solver_type'] = ls.get('type', 'unknown')
+                    if 'preconditioner' in ls and 'preconditioner_type' not in solver_info:
+                        solver_info['preconditioner_type'] = ls.get('preconditioner', 'none')
                     
-                    if 'iterations' in ls:
+                    if 'iterations' in ls and 'linear_iterations_mean' not in solver_info:
                         iters = ls['iterations']
                         if isinstance(iters, list):
                             solver_info['linear_iterations_mean'] = float(np.mean(iters))
@@ -65,8 +88,8 @@ class IncompressibleFlowMetricsComputer(SpecializedMetricsComputer):
                         else:
                             solver_info['linear_iterations'] = iters
             
-            # Block preconditioner info
-            if 'block_preconditioner' in meta:
+            # Block preconditioner info (legacy location)
+            if 'block_preconditioner' in meta and 'block_preconditioner' not in solver_info:
                 solver_info['block_preconditioner'] = meta['block_preconditioner']
             
         except Exception as e:

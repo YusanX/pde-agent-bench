@@ -38,18 +38,26 @@ class EllipticMetricsComputer(SpecializedMetricsComputer):
         metrics = {}
         
         try:
-            # 1. Compute DOF (more accurate estimation)
-            resolution = result.get('test_params', {}).get('resolution', 0)
-            degree = result.get('test_params', {}).get('degree', 1)
+            # 1. Read agent's solver_info from meta.json (primary source)
+            resolution = 0
+            degree = 1
+            iterations = None
             
-            # Try to read from meta.json solver_info (preferred for autonomous mode)
             meta_file = self.agent_output_dir / 'meta.json'
             if meta_file.exists():
                 with open(meta_file) as f:
                     meta = json.load(f)
                 solver_info = meta.get('solver_info', {})
-                resolution = solver_info.get('mesh_resolution', resolution)
-                degree = solver_info.get('element_degree', degree)
+                resolution = solver_info.get('mesh_resolution', 0)
+                degree = solver_info.get('element_degree', 1)
+                # Read iterations from solver_info (new unified location)
+                iterations = solver_info.get('iterations')
+            
+            # Fallback to test_params (for backward compatibility with guided mode)
+            if resolution == 0:
+                resolution = result.get('test_params', {}).get('resolution', 0)
+            if degree == 1:
+                degree = result.get('test_params', {}).get('degree', 1)
             
             # 2D triangular mesh DOF estimation
             # P1: DOF ≈ N^2
@@ -73,14 +81,18 @@ class EllipticMetricsComputer(SpecializedMetricsComputer):
                 metrics['efficiency_dof_per_sec'] = float(efficiency)
             
             # 3. Read solver information from meta.json
-            solver_info = self._read_solver_info()
-            if solver_info:
-                metrics.update(solver_info)
+            solver_info_metrics = self._read_solver_info()
+            if solver_info_metrics:
+                metrics.update(solver_info_metrics)
+                
+                # If iterations were already read from solver_info above, use that
+                if iterations is not None:
+                    metrics['linear_iterations'] = int(iterations)
                 
                 # Condition number estimate (from CG iterations)
                 # For SPD systems: CG iterations ~ sqrt(κ)
-                if 'linear_iterations_mean' in solver_info:
-                    iters = solver_info['linear_iterations_mean']
+                if 'linear_iterations' in metrics:
+                    iters = metrics['linear_iterations']
                     if iters > 0:
                         kappa_estimate = iters ** 2
                         metrics['condition_number_estimate'] = float(kappa_estimate)
@@ -102,24 +114,7 @@ class EllipticMetricsComputer(SpecializedMetricsComputer):
             with open(meta_file) as f:
                 meta = json.load(f)
             
-            # Read linear solver information
-            if 'linear_solver' in meta:
-                ls = meta['linear_solver']
-                if isinstance(ls, dict):
-                    solver_info['linear_solver_type'] = ls.get('type', 'unknown')
-                    solver_info['preconditioner_type'] = ls.get('preconditioner', 'none')
-                    
-                    # Iteration count
-                    if 'iterations' in ls:
-                        iters = ls['iterations']
-                        if isinstance(iters, list):
-                            solver_info['linear_iterations_mean'] = float(np.mean(iters))
-                            solver_info['linear_iterations_max'] = int(np.max(iters))
-                            solver_info['linear_iterations_total'] = int(np.sum(iters))
-                        else:
-                            solver_info['linear_iterations'] = iters
-            
-            # Read solver_info field (alternative structure)
+            # PRIMARY: Read from solver_info field (new unified location)
             if 'solver_info' in meta:
                 si = meta['solver_info']
                 if isinstance(si, dict):
@@ -127,8 +122,32 @@ class EllipticMetricsComputer(SpecializedMetricsComputer):
                         solver_info['linear_solver_type'] = si['ksp_type']
                     if 'pc_type' in si:
                         solver_info['preconditioner_type'] = si['pc_type']
+                    # Iterations (primary source)
                     if 'iterations' in si:
-                        solver_info['linear_iterations'] = si['iterations']
+                        iterations = si['iterations']
+                        if isinstance(iterations, (int, float)):
+                            solver_info['linear_iterations'] = int(iterations)
+                        elif isinstance(iterations, list):
+                            solver_info['linear_iterations'] = int(np.sum(iterations))
+                            solver_info['linear_iterations_per_solve'] = [int(x) for x in iterations]
+            
+            # FALLBACK: Read from legacy linear_solver field (backward compatibility)
+            if 'linear_solver' in meta:
+                ls = meta['linear_solver']
+                if isinstance(ls, dict):
+                    if 'type' in ls and 'linear_solver_type' not in solver_info:
+                        solver_info['linear_solver_type'] = ls.get('type', 'unknown')
+                    if 'preconditioner' in ls and 'preconditioner_type' not in solver_info:
+                        solver_info['preconditioner_type'] = ls.get('preconditioner', 'none')
+                    
+                    # Iteration count (fallback)
+                    if 'iterations' in ls and 'linear_iterations' not in solver_info:
+                        iters = ls['iterations']
+                        if isinstance(iters, list):
+                            solver_info['linear_iterations'] = int(np.sum(iters))
+                            solver_info['linear_iterations_per_solve'] = [int(x) for x in iters]
+                        else:
+                            solver_info['linear_iterations'] = int(iters)
             
             # Read discretization method
             if 'discretization_method' in meta:

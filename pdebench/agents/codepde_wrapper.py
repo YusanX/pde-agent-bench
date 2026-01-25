@@ -93,8 +93,6 @@ class CodePDEWrapper(BaseAgent):
         """
         使用 CodePDE 生成代码
         
-        注意：CodePDE 有自己的 prompt 生成机制，但我们会尝试
-              在用户 prompt 的基础上引导它生成合适的代码。
         """
         start_time = time.time()
         

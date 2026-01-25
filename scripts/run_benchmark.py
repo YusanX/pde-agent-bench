@@ -20,13 +20,16 @@ PDEBench 统一评测入口
     
     # 使用已有solver.py
     python run_benchmark.py --agent gpt-4o --solver-path /Users/yusan/agent/pdebench/results/gpt-5.1/poisson_basic/solver.py --cases poisson_basic
+    
+    # 批量评估已有目录下的所有solver（新功能）
+    python run_benchmark.py --agent qwen3-max --eval-existing-dir results/qwen3-max
 
 流程:
     1. 从 data/benchmark.jsonl 加载cases
     2. 对每个case:
        a. 运行oracle获取参考解（带缓存）
        b. 生成prompt
-       c. 调用LLM生成solver代码
+       c. 调用LLM生成solver代码（或从已有目录加载）
        d. 执行solver，计算误差
        e. 单档通过率评测（精度→时间）
     3. 汇总结果，保存报告
@@ -270,6 +273,7 @@ def run_single_case(
     oracle_cache_dir: Path,
     solver_path_override: Optional[Path] = None,
     skip_generation: bool = False,
+    existing_solver_dir: Optional[Path] = None,  # 新增：从已有目录读取solver
     timeout: int = 300,
     max_attempts: int = 1  # 实验 2.1: 多轮迭代
 ) -> Dict:
@@ -303,8 +307,15 @@ def run_single_case(
     
     if solver_path_override is not None:
         if not solver_path_override.exists():
-            return _make_error_result(case_id, 'SOLVER_NOT_FOUND', f"Solver path not found: {solver_path_override}")
+            return _make_error_result(case_id, 'SOLVER_NOT_FOUND', f"Solver path not found: {solver_path_override}", case_output=case_output, case=case)
         solver_code = solver_path_override.read_text()
+    elif existing_solver_dir is not None:
+        # 从已有目录读取solver（批量评估模式）
+        existing_solver_path = existing_solver_dir / case_id / "solver.py"
+        if not existing_solver_path.exists():
+            return _make_error_result(case_id, 'SOLVER_NOT_FOUND', f"Solver not found in existing dir: {existing_solver_path}", case_output=case_output, case=case)
+        print(f"   📂 Loading existing solver from: {existing_solver_path}")
+        solver_code = existing_solver_path.read_text()
     elif skip_generation and solver_path.exists():
         print(f"   ⏭️  Using existing solver")
         solver_code = solver_path.read_text()
@@ -331,7 +342,7 @@ def run_single_case(
             if not response.success:
                 print(f"   ❌ Agent call failed: {response.error}")
                 agent.cleanup()
-                return _make_error_result(case_id, 'AGENT_ERROR', response.error)
+                return _make_error_result(case_id, 'AGENT_ERROR', response.error, case_output=case_output, case=case)
             
             solver_code = response.code
             (case_output / "agent_response.txt").write_text(response.raw_response)
@@ -350,7 +361,7 @@ def run_single_case(
             print(f"   ❌ Agent call failed: {e}")
             import traceback
             traceback.print_exc()
-            return _make_error_result(case_id, 'AGENT_ERROR', str(e))
+            return _make_error_result(case_id, 'AGENT_ERROR', str(e), case_output=case_output, case=case)
     else:
         # ⭐ 使用纯 LLM（实验 1.1）
         print(f"   🤖 Calling {agent_name} (LLM)...")
@@ -359,7 +370,7 @@ def run_single_case(
             
             if not response.success:
                 print(f"   ❌ LLM call failed: {response.error}")
-                return _make_error_result(case_id, 'LLM_ERROR', response.error)
+                return _make_error_result(case_id, 'LLM_ERROR', response.error, case_output=case_output, case=case)
             
             solver_code = response.code
             (case_output / "llm_response.txt").write_text(response.raw_response)
@@ -369,7 +380,7 @@ def run_single_case(
                 
         except Exception as e:
             print(f"   ❌ LLM call failed: {e}")
-            return _make_error_result(case_id, 'LLM_ERROR', str(e))
+            return _make_error_result(case_id, 'LLM_ERROR', str(e), case_output=case_output, case=case)
     
     # Step 4: 执行solver
     print(f"   🔧 Executing solver...")
@@ -377,14 +388,14 @@ def run_single_case(
     
     if not exec_result['success']:
         print(f"   ❌ Execution failed: {exec_result.get('error_message', 'Unknown')[:100]}")
-        return _make_error_result(case_id, 'EXECUTION_ERROR', exec_result.get('error_message'), exec_result.get('stderr'))
+        return _make_error_result(case_id, 'EXECUTION_ERROR', exec_result.get('error_message'), exec_result.get('stderr'), case_output=case_output, case=case)
     
     # Step 5: 计算误差
     error = compute_error(exec_result['agent_output'], oracle_info)
     
     if np.isnan(error):
         print(f"   ❌ Error computation failed")
-        return _make_error_result(case_id, 'EVALUATION_ERROR', 'Error computation returned NaN')
+        return _make_error_result(case_id, 'EVALUATION_ERROR', 'Error computation returned NaN', case_output=case_output, case=case)
     
     print(f"   📊 Error: {error:.2e}, Time: {exec_result['time']:.3f}s")
     
@@ -415,6 +426,7 @@ def run_single_case(
     # 保存结果
     result = {
         'case_id': case_id,
+        'equation_type': case.get('pde_classification', {}).get('equation_type', 'unknown'),  # 添加equation_type
         'status': status,
         'error': error,
         'time': exec_result['time'],
@@ -480,10 +492,11 @@ def run_single_case(
     return result
 
 
-def _make_error_result(case_id: str, status: str, error_msg: str, stderr: str = None) -> Dict:
-    """创建错误结果"""
+def _make_error_result(case_id: str, status: str, error_msg: str, stderr: str = None, case_output: Path = None, case: Dict = None) -> Dict:
+    """创建错误结果并写入 result.json"""
     result = {
         'case_id': case_id,
+        'equation_type': case.get('pde_classification', {}).get('equation_type', 'unknown') if case else 'unknown',  # 添加equation_type
         'status': status,
         'error_message': error_msg
     }
@@ -499,6 +512,11 @@ def _make_error_result(case_id: str, status: str, error_msg: str, stderr: str = 
         'failure_stage': 'exec',
         'failure_reason': error_msg if error_msg else 'Unknown'
     }
+    
+    # 写入 result.json（每个 case 都应该有独立的结果文件）
+    if case_output is not None:
+        with open(case_output / "result.json", 'w') as f:
+            json.dump(result, f, indent=2)
     
     return result
 
@@ -529,6 +547,7 @@ def run_benchmark(
     equation_types: Optional[List[str]] = None,
     solver_path: Optional[Path] = None,
     skip_generation: bool = False,
+    existing_solver_dir: Optional[Path] = None,  # 新增：批量评估已有solver目录
     timeout: int = 300,
     max_attempts: int = 1  # 实验 2.1
 ):
@@ -541,6 +560,8 @@ def run_benchmark(
     print(f"📁 Output: {output_dir}")
     print(f"🤖 Agents: {', '.join(agents)}")
     print(f"⏱️  Timeout: {timeout}s")
+    if existing_solver_dir:
+        print(f"📂 Batch Eval Mode: {existing_solver_dir}")
     print("="*80)
     
     # 验证agents（支持 LLM 和 Code Agent）
@@ -560,10 +581,34 @@ def run_benchmark(
     
     # 加载cases
     cases = load_benchmark_cases(data_file, case_filter, equation_types)
-    print(f"\n📊 Loaded {len(cases)} cases")
+    print(f"\n📊 Loaded {len(cases)} cases from benchmark")
+    
+    # 🔍 如果是批量评估模式，自动过滤出存在solver的case
+    if existing_solver_dir:
+        available_solvers = []
+        for case in cases:
+            solver_file = existing_solver_dir / case['id'] / "solver.py"
+            if solver_file.exists():
+                available_solvers.append(case['id'])
+        
+        print(f"   🔍 Found {len(available_solvers)} existing solvers in {existing_solver_dir.name}")
+        
+        if not available_solvers:
+            print(f"   ⚠️  No solvers found in {existing_solver_dir}!")
+            print(f"   💡 Directory should contain: case_id/solver.py")
+            sys.exit(1)
+        
+        # 过滤cases，只保留有solver的
+        original_count = len(cases)
+        cases = [c for c in cases if c['id'] in available_solvers]
+        skipped = original_count - len(cases)
+        
+        if skipped > 0:
+            print(f"   ⏭️  Skipped {skipped} cases without solvers")
+        print(f"   ✅ Will evaluate {len(cases)} cases with existing solvers")
     
     if not cases:
-        print("❌ No cases found!")
+        print("❌ No cases to evaluate!")
         sys.exit(1)
     
     oracle_cache_dir = output_dir / ".oracle_cache"
@@ -586,6 +631,7 @@ def run_benchmark(
                 oracle_cache_dir=oracle_cache_dir,
                 solver_path_override=solver_path,
                 skip_generation=skip_generation,
+                existing_solver_dir=existing_solver_dir,  # 传递批量评估目录
                 timeout=timeout,
                 max_attempts=max_attempts
             )
@@ -618,6 +664,39 @@ def compute_summary(agent_name: str, results: List[Dict]) -> Dict:
     passed = sum(1 for r in results if r.get('status') == 'PASS')
     errors = [r['error'] for r in results if r.get('status') in ['PASS', 'FAIL'] and r.get('error') is not None]
     times = [r['time'] for r in results if r.get('status') in ['PASS', 'FAIL'] and r.get('time') is not None]
+    
+    # equation_type 统计
+    equation_type_summary: Dict[str, Dict[str, Any]] = {}
+    for r in results:
+        eq_type = r.get('equation_type', 'unknown')
+        if eq_type not in equation_type_summary:
+            equation_type_summary[eq_type] = {
+                'cases': 0,
+                'passed': 0,
+                'failed': 0,
+                'errors': [],
+                'times': []
+            }
+        equation_type_summary[eq_type]['cases'] += 1
+        if r.get('status') == 'PASS':
+            equation_type_summary[eq_type]['passed'] += 1
+        else:
+            equation_type_summary[eq_type]['failed'] += 1
+        
+        # 收集错误和时间用于计算平均值
+        if r.get('error') is not None:
+            equation_type_summary[eq_type]['errors'].append(r['error'])
+        if r.get('time') is not None:
+            equation_type_summary[eq_type]['times'].append(r['time'])
+    
+    # 计算每个equation_type的统计数据
+    for eq_type, info in equation_type_summary.items():
+        info['pass_rate'] = info['passed'] / info['cases'] if info['cases'] > 0 else 0.0
+        info['avg_error'] = float(np.mean(info['errors'])) if info['errors'] else None
+        info['avg_time'] = float(np.mean(info['times'])) if info['times'] else None
+        # 删除临时列表
+        info.pop('errors', None)
+        info.pop('times', None)
     
     # math_type 子榜
     math_type_summary: Dict[str, Dict[str, Any]] = {}
@@ -698,6 +777,7 @@ def compute_summary(agent_name: str, results: List[Dict]) -> Dict:
         'pass_rate': passed / total if total > 0 else 0,
         'avg_error': float(np.mean(errors)) if errors else None,
         'avg_time': float(np.mean(times)) if times else None,
+        'equation_type_summary': equation_type_summary,  # 按方程类型统计
         'math_type_summary': math_type_summary,
         'gate_statistics': gate_statistics,  # 实验 4.1
         'cost_analysis': cost_analysis,      # 实验 4.6
@@ -716,6 +796,22 @@ def print_summary(summary: Dict):
         print(f"Avg Error: {summary['avg_error']:.2e}")
     if summary['avg_time'] is not None:
         print(f"Avg Time: {summary['avg_time']:.3f}s")
+    
+    # Equation Type 统计（按方程类型）
+    if 'equation_type_summary' in summary and summary['equation_type_summary']:
+        print(f"\n{'─'*80}")
+        print(f"📊 Pass Rate by Equation Type")
+        print(f"{'─'*80}")
+        for eq_type, stats in sorted(summary['equation_type_summary'].items()):
+            print(f"\n  {eq_type.upper()}:")
+            print(f"    Total:      {stats['cases']} cases")
+            print(f"    Passed:     {stats['passed']} cases")
+            print(f"    Failed:     {stats['failed']} cases")
+            print(f"    Pass Rate:  {stats['pass_rate']:.1%}")
+            if stats.get('avg_error') is not None:
+                print(f"    Avg Error:  {stats['avg_error']:.2e}")
+            if stats.get('avg_time') is not None:
+                print(f"    Avg Time:   {stats['avg_time']:.3f}s")
     
     # Math Type 子榜统计
     if 'math_type_summary' in summary and summary['math_type_summary']:
@@ -839,6 +935,13 @@ def main():
     )
     
     parser.add_argument(
+        '--eval-existing-dir',
+        type=Path,
+        default=None,
+        help='Batch evaluate existing solvers from a directory (e.g., results/qwen3-max)'
+    )
+    
+    parser.add_argument(
         '--timeout',
         type=int,
         default=300,
@@ -863,6 +966,25 @@ def main():
         print(f"❌ Data file not found: {data_file}")
         sys.exit(1)
     
+    # 处理批量评估模式
+    existing_solver_dir = None
+    if args.eval_existing_dir:
+        existing_solver_dir = args.eval_existing_dir
+        if not existing_solver_dir.is_absolute():
+            existing_solver_dir = root_dir / existing_solver_dir
+        
+        if not existing_solver_dir.exists():
+            print(f"❌ Existing solver directory not found: {existing_solver_dir}")
+            sys.exit(1)
+        
+        print(f"\n🔄 Batch evaluation mode enabled")
+        print(f"   Reading solvers from: {existing_solver_dir}")
+        
+        # 自动检测并设置agent名称（如果没有指定）
+        if args.agent == ['qwen3-max'] or len(args.agent) == 1:
+            inferred_agent = existing_solver_dir.name
+            print(f"   Inferred agent name: {inferred_agent}")
+    
     run_benchmark(
         agents=args.agent,
         output_dir=output_dir,
@@ -871,6 +993,7 @@ def main():
         equation_types=args.equation_types,
         solver_path=args.solver_path,
         skip_generation=args.skip_generation,
+        existing_solver_dir=existing_solver_dir,  # 传递批量评估目录
         timeout=args.timeout,
         max_attempts=args.max_attempts
     )

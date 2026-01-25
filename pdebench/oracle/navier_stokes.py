@@ -277,6 +277,9 @@ class NavierStokesSolver:
     """Taylor-Hood mixed solver for steady incompressible Navier-Stokes."""
 
     def solve(self, case_spec: Dict[str, Any]) -> OracleResult:
+        # ⏱️ 开始计时整个求解流程
+        t_start_total = time.perf_counter()
+        
         msh = create_mesh(case_spec["domain"], case_spec["mesh"])
         dim = msh.geometry.dim
         degree_u = case_spec["fem"].get("degree_u", 2)
@@ -438,6 +441,9 @@ class NavierStokesSolver:
                 "cell_type": case_spec["mesh"].get("cell_type", "triangle"),
             }
         )
+
+        # ⏱️ 结束计时（包含完整流程）
+        baseline_time = time.perf_counter() - t_start_total
 
         return OracleResult(
             baseline_error=float(baseline_error),
