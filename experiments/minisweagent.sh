@@ -11,8 +11,7 @@ for case_dir in "$RESULTS_DIR"/*/; do
     fi
     
     cd "$case_dir" || continue
-    mini -m "gemini/gemini-2.5-pro" -t "$(cat prompt.md)" -y --exit-immediately
-
+    mini -m "anthropic.claude-sonnet-4-5-20250929-v1:0" -t "$(cat prompt.md)" -y --exit-immediately
     cd - > /dev/null
 
 done
