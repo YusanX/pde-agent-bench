@@ -61,11 +61,13 @@ class CodePDEWrapper(BaseAgent):
         self.model_family = self._get_model_family(self.model_name)
         self.api_key = self.config.get('api_key', None)
         self.temperature = self.config.get('temperature', 0.7)
+        # 兼容不同 OpenAI 模型：gpt-5.* 需要 max_completion_tokens
         self.max_tokens = self.config.get('max_tokens', 4096)
+        self.max_completion_tokens = self.config.get('max_completion_tokens', None)
         
         # CodePDE repeated_sample 配置（适配 pdebench）
         self.num_repeated_samples = max(1, int(self.config.get('num_repeated_samples', 3)))
-        self.num_debugging_trials = max(1, int(self.config.get('num_debugging_trials_per_sample', 2)))
+        self.num_debugging_trials = max(1, int(self.config.get('num_debugging_trials_per_sample', 1)))
         self.sample_delay_sec = float(self.config.get('sample_delay_sec', 1.0))
         self.evaluate_candidates = bool(self.config.get('evaluate_candidates', False))
         self.eval_timeout = int(self.config.get('eval_timeout', self.config.get('timeout', 300)))
@@ -217,14 +219,43 @@ class CodePDEWrapper(BaseAgent):
         """创建简化的配置对象"""
         class SimpleConfig:
             class Model:
-                def __init__(self, name, family_name, api_key, base_url=None):
+                def __init__(
+                    self,
+                    name,
+                    family_name,
+                    api_key,
+                    base_url=None,
+                    temperature=None,
+                    max_tokens=None,
+                    max_completion_tokens=None,
+                ):
                     self.name = name
                     self.family_name = family_name
                     self.api_key = api_key
                     self.base_url = base_url
+                    self.temperature = temperature
+                    self.max_tokens = max_tokens
+                    self.max_completion_tokens = max_completion_tokens
             
-            def __init__(self, model_name, family_name, api_key, base_url=None):
-                self.model = self.Model(model_name, family_name, api_key, base_url)
+            def __init__(
+                self,
+                model_name,
+                family_name,
+                api_key,
+                base_url=None,
+                temperature=None,
+                max_tokens=None,
+                max_completion_tokens=None,
+            ):
+                self.model = self.Model(
+                    model_name,
+                    family_name,
+                    api_key,
+                    base_url,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    max_completion_tokens=max_completion_tokens,
+                )
         
         # 获取 API key（从环境变量或配置）
         import os
@@ -245,54 +276,108 @@ class CodePDEWrapper(BaseAgent):
             self.model_name,
             self.model_family,
             api_key,
-            base_url
+            base_url,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            max_completion_tokens=self.max_completion_tokens or self.max_tokens,
         )
     
     def _prepare_messages(self, prompt: str, context: Dict[str, Any]) -> list:
         """
         准备发送给 LLM 的消息
         
-        我们直接使用 pdebench 的 prompt，并添加必要的格式说明
+        策略1: 使用 DOLFINx templates 作为 few-shot examples
         """
-        system_prompt = """You are an expert in numerical PDEs and scientific computing, particularly with FEniCSx/DOLFINx.
-
-Generate COMPLETE, RUNNABLE Python code that:
-1. Imports all necessary libraries
-2. Defines a function: def solve(case_spec: dict) -> str
-3. The solve() function should:
-   - Parse case_spec to get problem parameters
-   - Build mesh and function spaces using DOLFINx
-   - Set up and solve the PDE
-   - Save solution to 'solution.npz' with field 'u'
-   - Return the output filename
-4. Include error handling
-5. Add helpful comments
-
-Output ONLY the Python code, no explanations before or after."""
+        # 1. 提取 PDE 类型
+        case_spec = context.get('case_spec', {})
+        pde_type = case_spec.get('oracle_config', {}).get('pde', {}).get('type', 'poisson')
         
-        user_message = f"""{prompt}
+        # 检查是否有 time 字段 (用于区分稳态/瞬态)
+        has_time = 'time' in case_spec.get('oracle_config', {}).get('pde', {})
+        
+        # 2. 选择合适的模板
+        template_name, template_code = self._load_dolfinx_template(pde_type, has_time)
+        
+        # 3. 构造 system prompt (强调使用 DOLFINx)
+        system_prompt = """You are an expert in numerical PDEs and DOLFINx (FEniCSx).
 
-Please generate the complete Python code following this structure:
+Generate COMPLETE, RUNNABLE Python code using DOLFINx that:
+1. Imports: numpy, dolfinx (mesh, fem, default_scalar_type), ufl, mpi4py
+2. Defines: def solve(case_spec: dict) -> dict
+3. Returns: {"u": ndarray, "solver_info": dict, ...}
+4. Uses ONLY DOLFINx API (NO PyTorch, NO JAX)
+5. Follows the reference template structure shown below
+
+Key points:
+- Parse case_spec to extract all PDE parameters
+- Create mesh using dolfinx.mesh.create_unit_square()
+- Define variational forms with ufl
+- Use PETSc linear solvers via fem.petsc.LinearProblem
+- Extract solution on uniform grid for evaluation
+
+Output ONLY Python code, no markdown or explanations."""
+        
+        # 4. 构造 user message (PDEBench prompt + template)
+        if template_code:
+            user_message = f"""{prompt}
+
+---
+
+## Reference DOLFINx Implementation
+
+Here is a complete, working DOLFINx implementation for {template_name}:
+
+```python
+{template_code}
+```
+
+**Instructions:**
+1. Study the reference implementation above
+2. Adapt it to solve the specific problem described in the task
+3. Keep the same structure: parse case_spec → create mesh → define variational form → solve → extract grid
+4. Return dict with "u" (solution array) and "solver_info" (metadata)
+5. Handle boundary conditions and parameters based on case_spec
+
+Generate the complete Python code now."""
+        else:
+            # 后备：无模板可用
+            user_message = f"""{prompt}
+
+Generate complete DOLFINx code following this structure:
 
 ```python
 import numpy as np
-from dolfinx import mesh, fem
+from dolfinx import mesh, fem, default_scalar_type
+from dolfinx.fem.petsc import LinearProblem
+from mpi4py import MPI
 import ufl
-# ... other imports ...
 
-def solve(case_spec: dict) -> str:
-    '''Main solver function'''
-    # Your implementation here
-    output_path = "solution.npz"
-    # ... save results ...
-    return output_path
-
-if __name__ == '__main__':
-    import sys
-    import json
-    case_spec = json.loads(sys.argv[1])
-    output_file = solve(case_spec)
-    print(f"Solution saved to: {{output_file}}")
+def solve(case_spec: dict) -> dict:
+    # 1. Parse case_spec
+    pde_config = case_spec["oracle_config"]["pde"]
+    
+    # 2. Create mesh
+    domain = mesh.create_unit_square(MPI.COMM_WORLD, 64, 64)
+    
+    # 3. Function space
+    V = fem.functionspace(domain, ("Lagrange", 1))
+    
+    # 4. Variational problem
+    u = ufl.TrialFunction(V)
+    v = ufl.TestFunction(V)
+    # ... define a and L ...
+    
+    # 5. Boundary conditions
+    # ...
+    
+    # 6. Solve
+    problem = LinearProblem(a, L, bcs=[bc], petsc_options={{...}})
+    uh = problem.solve()
+    
+    # 7. Extract on grid
+    # ...
+    
+    return {{"u": u_grid, "solver_info": {{...}}}}
 ```"""
         
         messages = [
@@ -301,6 +386,47 @@ if __name__ == '__main__':
         ]
         
         return messages
+    
+    def _load_dolfinx_template(self, pde_type: str, has_time: bool = False) -> tuple:
+        """
+        加载对应的 DOLFINx 模板
+        
+        Returns:
+            (template_name, template_code) 或 (None, None)
+        """
+        # PDE 类型映射
+        template_map = {
+            'poisson': 'poisson_template.py',
+            'heat': 'heat_template.py',
+            'convection_diffusion': 'convection_diffusion_template.py',
+            'convection_diffusion_transient': 'heat_template.py',  # 使用 heat 模板作为时间步进参考
+            'darcy': 'poisson_template.py',  # Darcy 类似 Poisson
+            'reaction_diffusion': 'heat_template.py' if has_time else 'poisson_template.py',
+            'helmholtz': 'poisson_template.py',
+        }
+        
+        # 选择模板
+        if has_time and pde_type == 'convection_diffusion':
+            template_file = 'heat_template.py'  # 时间步进参考
+        elif pde_type in template_map:
+            template_file = template_map[pde_type]
+        else:
+            template_file = 'generic_template.py'
+        
+        # 加载模板代码
+        template_path = self.codepde_path / 'solvers' / 'dolfinx_templates' / template_file
+        
+        if template_path.exists():
+            try:
+                template_code = template_path.read_text()
+                template_name = template_file.replace('_template.py', '').replace('_', ' ').title()
+                return (template_name, template_code)
+            except Exception as e:
+                print(f"   ⚠️  Failed to load template {template_file}: {e}")
+                return (None, None)
+        else:
+            print(f"   ⚠️  Template not found: {template_path}")
+            return (None, None)
     
     def _extract_code(self, response) -> str:
         """从 LLM 响应中提取代码"""
