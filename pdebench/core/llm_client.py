@@ -51,7 +51,7 @@ class LLMClient:
         'gpt-4o': {'provider': 'openai', 'model': 'gpt-4o'},
         'gpt-4o-mini': {'provider': 'openai', 'model': 'gpt-4o-mini'},
         'gpt-5.1': {'provider': 'openai', 'model': 'gpt-5.1'},
-        'gpt-5.2': {'provider': 'openai', 'model': 'gpt-5.2'},  # 实验 1.1 新增
+        'gpt-5.2': {'provider': 'openai', 'model': 'gpt-5.2'},  
         'o3-mini': {'provider': 'openai', 'model': 'o3-mini'},
         'sonnet-3.5': {'provider': 'anthropic', 'model': 'anthropic.claude-3-5-sonnet-20241022-v2:0'},
         'sonnet-3.6': {'provider': 'anthropic', 'model': 'anthropic.claude-sonnet-4-20250514-v1:0'},
@@ -59,8 +59,9 @@ class LLMClient:
         'haiku': {'provider': 'anthropic', 'model': 'anthropic.claude-3-haiku-20240307-v1:0'},
         'gemini': {'provider': 'google', 'model': 'gemini-3.0-pro'},
         'gemini-3.0-pro': {'provider': 'google', 'model': 'gemini-3.0-pro'},  # 实验 1.1 别名
-        'qwen3-max': {'provider': 'qwen', 'model': 'qwen3-max-2025-09-23'},  
+        'qwen3-max': {'provider': 'qwen', 'model': 'qwen3-max-2026-01-23'},  
         'gpt-5.4': {'provider': 'openai', 'model': 'gpt-5.4'},
+        'claude-opus-4.6': {'provider': 'anthropic', 'model': 'anthropic.claude-opus-4-6-v1'},
     }
     
     # 定价信息（USD per 1M tokens）- 实验 4.6 成本追踪
@@ -68,12 +69,12 @@ class LLMClient:
         # OpenAI
         'gpt-5.2': {'input': 1.75, 'output': 14.00}, 
         'o3-mini': {'input': 1.10, 'output': 4.40},
-        
+        'gpt-5.4': {'input': 2.5, 'output': 15.00},
         # Anthropic
         'sonnet-3.5': {'input': 3.00, 'output': 6.00},
-        'claude-opus-4.5': {'input': 5.00, 'output': 25.00},  # 估算
+        'claude-opus-4.5': {'input': 5.00, 'output': 25.00}, 
         'haiku': {'input': 1, 'output': 5},
-        
+        'claude-opus-4.6': {'input': 5.00, 'output': 25.00},
         # Google
         'gemini-3.0-pro': {'input': 2, 'output': 12},
         # Qwen 
