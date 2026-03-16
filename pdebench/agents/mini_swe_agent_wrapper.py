@@ -28,6 +28,11 @@ def _build_task(prompt: str) -> str:
         "Write the complete implementation to `solver.py` in the current directory.\n"
         "The file must define `def solve(case_spec: dict) -> dict` at module level.\n"
         "Do not print anything to stdout during the solve() call.\n"
+        "You must solve the task independently from the problem statement only.\n"
+        "Do not inspect, search, open, import, copy, or adapt any files outside the current workspace directory.\n"
+        "In particular, do not read any project files, benchmark code, evaluator code, oracle solvers, cached results, prompts from other cases, or previously generated solvers.\n"
+        "Do not attempt to recover hidden reference implementations from the repository, git history, shell commands, Python imports, or filesystem traversal.\n"
+        "Any attempt to use repository files or reference solutions as external help is forbidden and counts as cheating.\n"
     )
 
 
