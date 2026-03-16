@@ -7,7 +7,7 @@ from typing import Any, Dict
 import numpy as np
 import sympy as sp
 import ufl
-from dolfinx import fem
+from dolfinx import fem, mesh as dmesh
 from dolfinx.fem.petsc import LinearProblem, NonlinearProblem
 from petsc4py import PETSc
 
@@ -72,10 +72,20 @@ def _build_dirichlet_bcs(
     bcs = []
     dirichlet_cfgs = _normalize_dirichlet_cfg(bc_cfg)
     V, _ = W.sub(0).collapse()
+    fdim = msh.topology.dim - 1
     for cfg in dirichlet_cfgs:
         on = cfg.get("on", "all")
-        selector = _boundary_selector(on, dim)
-        boundary_dofs = fem.locate_dofs_geometrical((W.sub(0), V), selector)
+        if on.lower() in {"all", "*"}:
+            # Topological approach: locate boundary facets first, then DOFs on those facets.
+            # locate_dofs_geometrical with np.ones(...) would incorrectly select ALL interior
+            # DOFs as Dirichlet, bypassing the FEM solve entirely.
+            facets = dmesh.locate_entities_boundary(
+                msh, fdim, lambda x: np.ones(x.shape[1], dtype=bool)
+            )
+            boundary_dofs = fem.locate_dofs_topological((W.sub(0), V), fdim, facets)
+        else:
+            selector = _boundary_selector(on, dim)
+            boundary_dofs = fem.locate_dofs_geometrical((W.sub(0), V), selector)
         value = cfg.get("value", "0.0")
         if isinstance(value, str) and value in {"u", "u_exact"}:
             if u_exact is None:
@@ -183,6 +193,7 @@ def _solve_navier_stokes(
     bcs: list[fem.DirichletBC],
     solver_params: Dict[str, Any],
     init_mode: str,
+    u_exact: "fem.Function | None" = None,
 ) -> tuple[fem.Function, Dict[str, Any]]:
     w = fem.Function(W)
     u, p = ufl.split(w)
@@ -221,6 +232,89 @@ def _solve_navier_stokes(
         w.x.array[:] = w0.x.array
     elif init_mode == "zero":
         w.x.array[:] = 0.0
+    elif init_mode == "exact":
+        # Initialize from interpolated exact solution — guarantees Newton starts
+        # in the correct basin of attraction. Only valid for manufactured cases.
+        if u_exact is None:
+            raise ValueError("init='exact' requires a manufactured solution (u_exact)")
+        V, _ = W.sub(0).collapse()
+        from .common import interpolate_expression
+        import ufl as _ufl
+        x_coord = _ufl.SpatialCoordinate(msh)
+        # u_exact is already a fem.Function in V; scatter its DOFs into W.sub(0)
+        u_init = fem.Function(V)
+        u_init.x.array[:] = u_exact.x.array
+        # Also zero-initialize pressure (will be corrected by Newton)
+        w.x.array[:] = 0.0
+        # Inject u_exact values into the velocity sub-space of w
+        W.sub(0).collapse()
+        try:
+            # Map DOFs from collapsed V to W.sub(0)
+            dof_map = W.sub(0).dofmap
+            w_arr = w.x.array
+            # Use dolfinx interpolation into sub-space
+            w_u = w.sub(0)
+            w_u.interpolate(u_init)
+            w.x.scatter_forward()
+        except Exception:
+            # Fallback: set via petsc BC enforcement using u_exact as the BC value
+            fem.petsc.set_bc(w.x.petsc_vec, bcs)
+            w.x.scatter_forward()
+    elif init_mode == "continuation":
+        # Re-continuation: solve from high nu → target nu, using each solution
+        # as warm-start for the next step. Robust for moderate/high Re cases.
+        nu_start = solver_params.get("continuation_nu_start", 1.0)
+        n_steps = solver_params.get("continuation_steps", 8)
+        nu_values = [
+            nu_start * (nu / nu_start) ** (k / n_steps)
+            for k in range(1, n_steps + 1)
+        ]
+        # step 0: Stokes init at nu_start
+        (u_s, p_s) = ufl.TrialFunctions(W)
+        (v_s, q_s) = ufl.TestFunctions(W)
+        a_stokes_c = (
+            nu_start * ufl.inner(ufl.grad(u_s), ufl.grad(v_s)) * ufl.dx
+            - ufl.div(v_s) * p_s * ufl.dx
+            - q_s * ufl.div(u_s) * ufl.dx
+        )
+        L_stokes_c = ufl.inner(f_expr, v_s) * ufl.dx
+        stokes_c = LinearProblem(
+            a_stokes_c, L_stokes_c, bcs=bcs,
+            petsc_options={"ksp_type": "minres", "pc_type": "hypre", "ksp_rtol": 1e-10},
+            petsc_options_prefix="oracle_ns_cont_init_",
+        )
+        w0 = stokes_c.solve()
+        w.x.array[:] = w0.x.array
+        # continuation loop
+        cont_opts = {
+            "snes_type": "newtonls",
+            "snes_linesearch_type": solver_params.get("linesearch", "bt"),
+            "snes_rtol": 1e-8,
+            "snes_atol": 1e-10,
+            "snes_max_it": solver_params.get("max_it", 50),
+            "ksp_type": solver_params.get("ksp_type", "gmres"),
+            "pc_type": solver_params.get("pc_type", "lu"),
+        }
+        for step_nu in nu_values:
+            w_step = fem.Function(W)
+            u_step, p_step = ufl.split(w_step)
+            v_step, q_step = ufl.TestFunctions(W)
+            F_step = (
+                ufl.inner(ufl.dot(ufl.grad(u_step), u_step), v_step) * ufl.dx
+                + step_nu * ufl.inner(ufl.grad(u_step), ufl.grad(v_step)) * ufl.dx
+                - p_step * ufl.div(v_step) * ufl.dx
+                - q_step * ufl.div(u_step) * ufl.dx
+                - ufl.inner(f_expr, v_step) * ufl.dx
+            )
+            J_step = ufl.derivative(F_step, w_step)
+            w_step.x.array[:] = w.x.array
+            prob_step = NonlinearProblem(
+                F_step, w_step, bcs=bcs, J=J_step,
+                petsc_options_prefix=f"oracle_ns_cont_step_",
+                petsc_options=cont_opts,
+            )
+            w_step = prob_step.solve()
+            w.x.array[:] = w_step.x.array
     else:
         raise ValueError(f"Unsupported init mode: {init_mode}")
 
@@ -354,7 +448,8 @@ class NavierStokesSolver:
 
         baseline_time = time.time()
         w_h, solver_info = _solve_navier_stokes(
-            msh, W, f_expr, nu, bcs, solver_params, init_mode
+            msh, W, f_expr, nu, bcs, solver_params, init_mode,
+            u_exact=u_exact,
         )
         baseline_time = time.time() - baseline_time
 
@@ -367,9 +462,30 @@ class NavierStokesSolver:
 
         baseline_error = 0.0
         if u_exact is not None:
-            _, _, u_exact_grid = sample_vector_magnitude_on_grid(
-                u_exact, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-            )
+            # Evaluate the EXACT analytical solution directly on the output grid
+            # (not via FEM interpolation) so that oracle_error reflects the true
+            # FEM discretisation error.  This avoids the pathological case where
+            # FEM init from u_exact makes oracle_error identically 0.
+            bbox = grid_cfg["bbox"]
+            nx_g, ny_g = grid_cfg["nx"], grid_cfg["ny"]
+            x_lin = np.linspace(bbox[0], bbox[1], nx_g)
+            y_lin = np.linspace(bbox[2], bbox[3], ny_g)
+            xx, yy = np.meshgrid(x_lin, y_lin, indexing="xy")
+            manufactured = pde_cfg.get("manufactured_solution", {})
+            u_sym_strs = manufactured.get("u", [])
+            sx, sy = sp.symbols("x y", real=True)
+            local_d = {"x": sx, "y": sy}
+            try:
+                u_sym_vec = [sp.sympify(s, locals=local_d) for s in u_sym_strs]
+                u1_fn = sp.lambdify((sx, sy), u_sym_vec[0], "numpy")
+                u2_fn = sp.lambdify((sx, sy), u_sym_vec[1], "numpy")
+                u_mag_exact = np.sqrt(u1_fn(xx, yy) ** 2 + u2_fn(xx, yy) ** 2)
+                u_exact_grid = u_mag_exact  # shape (ny, nx)
+            except Exception:
+                # Fallback: use FEM interpolant (old behaviour)
+                _, _, u_exact_grid = sample_vector_magnitude_on_grid(
+                    u_exact, bbox, nx_g, ny_g
+                )
             baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
             u_grid = u_exact_grid
         else:

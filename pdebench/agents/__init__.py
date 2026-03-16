@@ -22,10 +22,14 @@ from .agent_registry import AgentRegistry, get_agent
 # 导入所有 agent wrappers
 
 from .codepde_wrapper import CodePDEWrapper
+from .openhands_wrapper import OpenHandsWrapper
+from .mini_swe_agent_wrapper import MiniSWEAgentWrapper
 
 
 # 注册所有 Agent
 AgentRegistry.register('codepde', CodePDEWrapper)
+AgentRegistry.register('openhands', OpenHandsWrapper)
+AgentRegistry.register('mini-swe-agent', MiniSWEAgentWrapper)
 
 
 # 导出
@@ -35,4 +39,6 @@ __all__ = [
     'AgentRegistry',
     'get_agent',
     'CodePDEWrapper',
+    'OpenHandsWrapper',
+    'MiniSWEAgentWrapper',
 ]

@@ -1,0 +1,7 @@
+{
+  "mode": "cli",
+  "model": "gpt-5.2",
+  "api_key": "",
+  "base_url": "",
+  "timeout": 600
+}

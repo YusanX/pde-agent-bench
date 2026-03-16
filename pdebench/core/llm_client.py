@@ -60,6 +60,7 @@ class LLMClient:
         'gemini': {'provider': 'google', 'model': 'gemini-3.0-pro'},
         'gemini-3.0-pro': {'provider': 'google', 'model': 'gemini-3.0-pro'},  # 实验 1.1 别名
         'qwen3-max': {'provider': 'qwen', 'model': 'qwen3-max-2025-09-23'},  
+        'gpt-5.4': {'provider': 'openai', 'model': 'gpt-5.4'},
     }
     
     # 定价信息（USD per 1M tokens）- 实验 4.6 成本追踪

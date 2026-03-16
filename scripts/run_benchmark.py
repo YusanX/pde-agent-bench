@@ -536,6 +536,732 @@ def _write_oracle_reference(case: Dict, oracle_info: Dict, oracle_output: Path):
 
 
 # =============================================================================
+# 实验 2.1: 多轮迭代辅助函数
+# =============================================================================
+
+def _select_best_attempt(all_attempts: List[Dict]) -> Dict:
+    """
+    从所有尝试中选择最佳结果
+    
+    优先级：
+    1. PASS 状态的尝试
+    2. 执行成功且误差最小的尝试
+    3. 最后一次尝试
+    """
+    if not all_attempts:
+        return {}
+    
+    # 优先选择通过的尝试
+    passed_attempts = [a for a in all_attempts if a.get('status') == 'PASS']
+    if passed_attempts:
+        # 如果有多个通过，选择误差最小的
+        return min(passed_attempts, key=lambda a: a.get('error', float('inf')))
+    
+    # 选择执行成功的尝试中误差最小的
+    successful_attempts = [a for a in all_attempts if a.get('success') and a.get('error') is not None]
+    if successful_attempts:
+        return min(successful_attempts, key=lambda a: a.get('error'))
+    
+    # 返回最后一次尝试
+    return all_attempts[-1]
+
+
+def _compute_improvement_summary(all_attempts: List[Dict]) -> Dict:
+    """
+    计算改进总结
+    
+    统计每轮尝试之间的变化，包括：
+    - 误差改进
+    - 时间改进  
+    - Gate 状态改进
+    """
+    if len(all_attempts) <= 1:
+        return {
+            'total_attempts': len(all_attempts),
+            'improvements': []
+        }
+    
+    improvements = []
+    for i in range(1, len(all_attempts)):
+        prev = all_attempts[i-1]
+        curr = all_attempts[i]
+        
+        improvement = {
+            'from_attempt': prev['attempt_num'],
+            'to_attempt': curr['attempt_num']
+        }
+        
+        # 误差改进
+        if prev.get('error') is not None and curr.get('error') is not None:
+            error_delta = curr['error'] - prev['error']
+            error_ratio = curr['error'] / prev['error'] if prev['error'] > 0 else None
+            improvement['error_change'] = {
+                'prev': prev['error'],
+                'curr': curr['error'],
+                'delta': error_delta,
+                'ratio': error_ratio,
+                'improved': error_delta < 0
+            }
+        
+        # 时间改进
+        if prev.get('time') is not None and curr.get('time') is not None:
+            time_delta = curr['time'] - prev['time']
+            time_ratio = curr['time'] / prev['time'] if prev['time'] > 0 else None
+            improvement['time_change'] = {
+                'prev': prev['time'],
+                'curr': curr['time'],
+                'delta': time_delta,
+                'ratio': time_ratio,
+                'improved': time_delta < 0
+            }
+        
+        # Gate 状态改进
+        if prev.get('gate_breakdown') and curr.get('gate_breakdown'):
+            prev_gate = prev['gate_breakdown']
+            curr_gate = curr['gate_breakdown']
+            improvement['gate_change'] = {
+                'exec_valid': {
+                    'prev': prev_gate['exec_valid'],
+                    'curr': curr_gate['exec_valid'],
+                    'improved': curr_gate['exec_valid'] and not prev_gate['exec_valid']
+                },
+                'accuracy_pass': {
+                    'prev': prev_gate['accuracy_pass'],
+                    'curr': curr_gate['accuracy_pass'],
+                    'improved': curr_gate['accuracy_pass'] and not prev_gate['accuracy_pass']
+                },
+                'time_pass': {
+                    'prev': prev_gate['time_pass'],
+                    'curr': curr_gate['time_pass'],
+                    'improved': curr_gate['time_pass'] and not prev_gate['time_pass']
+                }
+            }
+        
+        improvements.append(improvement)
+    
+    return {
+        'total_attempts': len(all_attempts),
+        'improvements': improvements,
+        'any_improvement': any(
+            imp.get('error_change', {}).get('improved') or
+            imp.get('time_change', {}).get('improved') or
+            any(imp.get('gate_change', {}).get(k, {}).get('improved', False) 
+                for k in ['exec_valid', 'accuracy_pass', 'time_pass'])
+            for imp in improvements
+        )
+    }
+
+
+def _aggregate_llm_usage(all_attempts: List[Dict]) -> Optional[Dict]:
+    """
+    汇总所有尝试的 LLM 使用情况
+    """
+    usages = [a.get('llm_usage') for a in all_attempts if a.get('llm_usage')]
+    if not usages:
+        return None
+    
+    total_input_tokens = sum(u.get('input_tokens', 0) for u in usages)
+    total_output_tokens = sum(u.get('output_tokens', 0) for u in usages)
+    total_tokens = sum(u.get('total_tokens', 0) for u in usages)
+    total_cost = sum(u.get('cost_usd', 0) for u in usages)
+    latencies = [u.get('latency_sec', 0) for u in usages if 'latency_sec' in u]
+    
+    return {
+        'total_input_tokens': total_input_tokens,
+        'total_output_tokens': total_output_tokens,
+        'total_tokens': total_tokens if total_tokens > 0 else (total_input_tokens + total_output_tokens),
+        'total_cost_usd': total_cost,
+        'avg_latency_sec': float(np.mean(latencies)) if latencies else None,
+        'num_calls': len(usages),
+        'per_attempt_usage': usages
+    }
+
+
+def _make_error_result_with_attempts(
+    case_id: str, 
+    status: str, 
+    error_msg: str, 
+    stderr: str = None,
+    case_output: Path = None,
+    case: Dict = None,
+    all_attempts: List[Dict] = None,
+    gate_transitions: List[Dict] = None,
+    target_error: float = None,
+    target_time: float = None,
+    oracle_info: Dict = None,
+    accuracy_tolerance: float = None,
+    time_tolerance: float = None,
+    legacy_tolerance: float = None
+) -> Dict:
+    """创建包含多轮尝试信息的错误结果"""
+    
+    # 基础错误结果
+    result = {
+        'case_id': case_id,
+        'equation_type': case.get('pde_classification', {}).get('equation_type', 'unknown') if case else 'unknown',
+        'status': status,
+        'error_message': error_msg
+    }
+    
+    if stderr:
+        result['stderr'] = stderr
+    
+    # 最后一次尝试的 gate 信息
+    if all_attempts and all_attempts[-1].get('gate_breakdown'):
+        result['gate_breakdown'] = all_attempts[-1]['gate_breakdown']
+    else:
+        result['gate_breakdown'] = {
+            'exec_valid': False,
+            'accuracy_pass': False,
+            'time_pass': False,
+            'final_pass': False,
+            'failure_stage': 'exec',
+            'failure_reason': error_msg if error_msg else 'Unknown'
+        }
+    
+    # 添加 oracle 和 target 信息
+    if oracle_info:
+        result['oracle_error'] = oracle_info.get('error')
+        result['oracle_time'] = oracle_info.get('time')
+    if target_error is not None:
+        result['target_error'] = target_error
+    if target_time is not None:
+        result['target_time'] = target_time
+    if accuracy_tolerance is not None:
+        result['accuracy_tolerance'] = accuracy_tolerance
+    if time_tolerance is not None:
+        result['time_tolerance'] = time_tolerance
+    if legacy_tolerance is not None:
+        result['tolerance'] = legacy_tolerance
+    
+    # 多轮尝试信息
+    if all_attempts:
+        result['multi_attempt_info'] = {
+            'max_attempts': all_attempts[-1]['attempt_num'] if all_attempts else 0,
+            'num_attempts': len(all_attempts),
+            'all_attempts': all_attempts,
+            'gate_transitions': gate_transitions or [],
+            'improvement_summary': _compute_improvement_summary(all_attempts)
+        }
+        
+        # 汇总 LLM 使用
+        total_usage = _aggregate_llm_usage(all_attempts)
+        if total_usage:
+            result['llm_usage'] = total_usage
+    
+    # 写入 result.json
+    if case_output is not None:
+        with open(case_output / "result.json", 'w') as f:
+            json.dump(result, f, indent=2)
+    
+    return result
+
+
+# =============================================================================
+# 实验 2.1: 多轮迭代主函数
+# =============================================================================
+
+def run_single_case_multi_attempt(
+    case: Dict,
+    agent_name: str,
+    output_dir: Path,
+    oracle_cache_dir: Path,
+    timeout: int = 300,
+    max_attempts: int = 3
+) -> Dict:
+    """
+    运行单个case的多轮迭代流程（实验 2.1）
+    
+    Multi-Attempt Protocol:
+    - 每个case最多尝试 max_attempts 次
+    - 每次失败后提供结构化反馈（stderr + gate outcomes + metrics）
+    - 追踪 gate 状态转换 (exec-fail → exec-valid, accuracy-fail → pass)
+    - 记录策略变化和代码差异
+    
+    Args:
+        case: Case 配置
+        agent_name: Agent 名称
+        output_dir: 输出目录
+        oracle_cache_dir: Oracle 缓存目录
+        timeout: 执行超时时间
+        max_attempts: 最大尝试次数
+    
+    Returns:
+        最终结果字典（包含所有尝试的详细信息）
+    """
+    
+    case_id = case['id']
+    case_output = output_dir / case_id
+    case_output.mkdir(parents=True, exist_ok=True)
+    
+    oracle_output = case_output / "oracle_output"
+    oracle_output.mkdir(parents=True, exist_ok=True)
+    
+    print(f"\n{'='*60}")
+    print(f"📋 Case: {case_id}")
+    print(f"🔄 Multi-attempt mode: max {max_attempts} attempts")
+    print(f"{'='*60}")
+    
+    # Step 1: 获取 oracle 参考解
+    oracle_info = run_oracle(case, oracle_cache_dir)
+    _write_oracle_reference(case, oracle_info, oracle_output)
+    
+    # Step 2: 生成初始 prompt
+    original_prompt = generate_prompt(case, oracle_info)
+    (case_output / "prompt_attempt_1.md").write_text(original_prompt)
+    
+    # 计算目标阈值
+    eval_cfg = case.get('evaluation_config', {})
+    legacy_tolerance = eval_cfg.get('tolerance', 1.2)
+    accuracy_tolerance = eval_cfg.get('accuracy_tolerance', legacy_tolerance)
+    time_tolerance = eval_cfg.get('time_tolerance', legacy_tolerance)
+    MIN_ERROR_THRESHOLD = 1e-6
+    target_error = max(oracle_info['error'] * accuracy_tolerance, MIN_ERROR_THRESHOLD)
+    target_time = oracle_info['time'] * time_tolerance
+    
+    # 检测 agent 类型
+    is_code_agent = AgentRegistry.is_registered(agent_name)
+    
+    # 存储所有尝试的信息
+    all_attempts = []
+    gate_transitions = []
+    
+    # ========================================================================
+    # 多轮迭代循环
+    # ========================================================================
+    
+    for attempt_num in range(1, max_attempts + 1):
+        print(f"\n{'─'*60}")
+        print(f"🔄 Attempt {attempt_num}/{max_attempts}")
+        print(f"{'─'*60}")
+        
+        # Step 3: 生成当前尝试的 prompt
+        if attempt_num == 1:
+            current_prompt = original_prompt
+        else:
+            # 使用反馈 prompt
+            previous_attempt = all_attempts[-1]
+            current_prompt = create_feedback_prompt(
+                original_prompt=original_prompt,
+                previous_attempt=previous_attempt,
+                target_error=target_error,
+                target_time=target_time,
+                oracle_info=oracle_info,
+                attempt_num=attempt_num
+            )
+            (case_output / f"prompt_attempt_{attempt_num}.md").write_text(current_prompt)
+        
+        # Step 4: 调用 LLM/Agent 生成代码
+        solver_code = None
+        llm_response = None
+        llm_usage = None
+        
+        try:
+            if is_code_agent:
+                # Code Agent
+                print(f"   🤖 Calling {agent_name} (Code Agent)...")
+                agent_config = load_agent_config(agent_name)
+                agent = get_agent(agent_name, config=agent_config)
+                
+                llm_response = agent.generate_solution(
+                    prompt=current_prompt,
+                    context={
+                        'case_id': case_id,
+                        'case_spec': case,
+                        'oracle_info': oracle_info,
+                        'attempt_num': attempt_num,
+                        'max_attempts': max_attempts
+                    }
+                )
+                
+                if not llm_response.success:
+                    print(f"   ❌ Agent call failed: {llm_response.error}")
+                    agent.cleanup()
+                    
+                    # 记录失败的尝试
+                    all_attempts.append({
+                        'attempt_num': attempt_num,
+                        'code': None,
+                        'success': False,
+                        'error': None,
+                        'time': None,
+                        'error_message': f"Agent call failed: {llm_response.error}",
+                        'stderr': '',
+                        'llm_usage': llm_response.usage if llm_response.usage else None
+                    })
+                    
+                    if attempt_num == max_attempts:
+                        return _make_error_result_with_attempts(
+                            case_id, 'AGENT_ERROR', llm_response.error,
+                            case_output=case_output, case=case,
+                            all_attempts=all_attempts, gate_transitions=gate_transitions,
+                            target_error=target_error, target_time=target_time,
+                            oracle_info=oracle_info, accuracy_tolerance=accuracy_tolerance,
+                            time_tolerance=time_tolerance, legacy_tolerance=legacy_tolerance
+                        )
+                    continue
+                
+                solver_code = llm_response.code
+                llm_usage = llm_response.usage
+                (case_output / f"agent_response_attempt_{attempt_num}.txt").write_text(llm_response.raw_response)
+                
+                if llm_usage:
+                    tokens_in = llm_usage.get('input_tokens', 0)
+                    tokens_out = llm_usage.get('output_tokens', 0)
+                    if tokens_in > 0 or tokens_out > 0:
+                        print(f"   📊 Tokens: in={tokens_in}, out={tokens_out}")
+                    if 'latency_sec' in llm_usage:
+                        print(f"   ⏱️  Latency: {llm_usage['latency_sec']:.2f}s")
+                
+                agent.cleanup()
+                
+            else:
+                # 纯 LLM
+                print(f"   🤖 Calling {agent_name} (LLM)...")
+                llm_response = call_llm(agent_name, current_prompt)
+                
+                if not llm_response.success:
+                    print(f"   ❌ LLM call failed: {llm_response.error}")
+                    
+                    all_attempts.append({
+                        'attempt_num': attempt_num,
+                        'code': None,
+                        'success': False,
+                        'error': None,
+                        'time': None,
+                        'error_message': f"LLM call failed: {llm_response.error}",
+                        'stderr': '',
+                        'llm_usage': llm_response.usage if llm_response.usage else None
+                    })
+                    
+                    if attempt_num == max_attempts:
+                        return _make_error_result_with_attempts(
+                            case_id, 'LLM_ERROR', llm_response.error,
+                            case_output=case_output, case=case,
+                            all_attempts=all_attempts, gate_transitions=gate_transitions,
+                            target_error=target_error, target_time=target_time,
+                            oracle_info=oracle_info, accuracy_tolerance=accuracy_tolerance,
+                            time_tolerance=time_tolerance, legacy_tolerance=legacy_tolerance
+                        )
+                    continue
+                
+                solver_code = llm_response.code
+                llm_usage = llm_response.usage
+                (case_output / f"llm_response_attempt_{attempt_num}.txt").write_text(llm_response.raw_response)
+                
+                if llm_usage:
+                    print(f"   📊 Tokens: in={llm_usage['input_tokens']}, out={llm_usage['output_tokens']}")
+        
+        except Exception as e:
+            print(f"   ❌ LLM/Agent call exception: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            all_attempts.append({
+                'attempt_num': attempt_num,
+                'code': None,
+                'success': False,
+                'error': None,
+                'time': None,
+                'error_message': str(e),
+                'stderr': traceback.format_exc(),
+                'llm_usage': None
+            })
+            
+            if attempt_num == max_attempts:
+                return _make_error_result_with_attempts(
+                    case_id, 'LLM_ERROR', str(e),
+                    case_output=case_output, case=case,
+                    all_attempts=all_attempts, gate_transitions=gate_transitions,
+                    target_error=target_error, target_time=target_time,
+                    oracle_info=oracle_info, accuracy_tolerance=accuracy_tolerance,
+                    time_tolerance=time_tolerance, legacy_tolerance=legacy_tolerance
+                )
+            continue
+        
+        # Step 5: 执行 solver
+        print(f"   🔧 Executing solver...")
+        
+        # 保存当前尝试的 solver 代码
+        (case_output / f"solver_attempt_{attempt_num}.py").write_text(solver_code)
+        
+        exec_result = execute_solver(solver_code, case, case_output, timeout)
+        
+        # Step 6: 评估结果
+        if not exec_result['success']:
+            print(f"   ❌ Execution failed: {exec_result.get('error_message', 'Unknown')[:100]}")
+            
+            # 记录失败的尝试
+            attempt_info = {
+                'attempt_num': attempt_num,
+                'code': solver_code,
+                'success': False,
+                'error': None,
+                'time': exec_result.get('time'),
+                'error_message': exec_result.get('error_message'),
+                'stderr': exec_result.get('stderr', ''),
+                'stdout': exec_result.get('stdout', ''),
+                'llm_usage': llm_usage
+            }
+            all_attempts.append(attempt_info)
+            
+            # Gate 分析
+            gate_analyzer = GateAnalyzer()
+            gate_breakdown = gate_analyzer.analyze_single_case(
+                case_id=case_id,
+                exec_result={'success': False, 'error_message': exec_result.get('error_message')},
+                eval_result={'target_error': target_error, 'target_time': target_time},
+                oracle_info=oracle_info
+            )
+            
+            # 更新 gate 信息
+            all_attempts[-1]['gate_breakdown'] = {
+                'exec_valid': gate_breakdown.exec_valid,
+                'accuracy_pass': gate_breakdown.accuracy_pass,
+                'time_pass': gate_breakdown.time_pass,
+                'final_pass': gate_breakdown.final_pass,
+                'failure_stage': gate_breakdown.failure_stage,
+                'failure_reason': gate_breakdown.failure_reason
+            }
+            
+            # 记录 gate 转换
+            if attempt_num > 1 and all_attempts[-2].get('gate_breakdown'):
+                prev_gate = all_attempts[-2]['gate_breakdown']
+                curr_gate = all_attempts[-1]['gate_breakdown']
+                gate_transitions.append({
+                    'from_attempt': attempt_num - 1,
+                    'to_attempt': attempt_num,
+                    'transition': {
+                        'exec_valid': f"{prev_gate['exec_valid']} → {curr_gate['exec_valid']}",
+                        'accuracy_pass': f"{prev_gate['accuracy_pass']} → {curr_gate['accuracy_pass']}",
+                        'time_pass': f"{prev_gate['time_pass']} → {curr_gate['time_pass']}",
+                        'final_pass': f"{prev_gate['final_pass']} → {curr_gate['final_pass']}"
+                    },
+                    'improvement': {
+                        'exec_valid': curr_gate['exec_valid'] and not prev_gate['exec_valid'],
+                        'accuracy_pass': curr_gate['accuracy_pass'] and not prev_gate['accuracy_pass'],
+                        'time_pass': curr_gate['time_pass'] and not prev_gate['time_pass'],
+                        'final_pass': curr_gate['final_pass'] and not prev_gate['final_pass']
+                    }
+                })
+            
+            if attempt_num == max_attempts:
+                return _make_error_result_with_attempts(
+                    case_id, 'EXECUTION_ERROR',
+                    exec_result.get('error_message'),
+                    exec_result.get('stderr'),
+                    case_output=case_output, case=case,
+                    all_attempts=all_attempts, gate_transitions=gate_transitions,
+                    target_error=target_error, target_time=target_time,
+                    oracle_info=oracle_info, accuracy_tolerance=accuracy_tolerance,
+                    time_tolerance=time_tolerance, legacy_tolerance=legacy_tolerance
+                )
+            continue
+        
+        # 执行成功，计算误差
+        error = compute_error(exec_result['agent_output'], oracle_info)
+        
+        if np.isnan(error):
+            print(f"   ❌ Error computation failed")
+            
+            attempt_info = {
+                'attempt_num': attempt_num,
+                'code': solver_code,
+                'success': False,
+                'error': None,
+                'time': exec_result['time'],
+                'error_message': 'Error computation returned NaN',
+                'stderr': '',
+                'stdout': exec_result.get('stdout', ''),
+                'llm_usage': llm_usage
+            }
+            all_attempts.append(attempt_info)
+            
+            if attempt_num == max_attempts:
+                return _make_error_result_with_attempts(
+                    case_id, 'EVALUATION_ERROR',
+                    'Error computation returned NaN',
+                    case_output=case_output, case=case,
+                    all_attempts=all_attempts, gate_transitions=gate_transitions,
+                    target_error=target_error, target_time=target_time,
+                    oracle_info=oracle_info, accuracy_tolerance=accuracy_tolerance,
+                    time_tolerance=time_tolerance, legacy_tolerance=legacy_tolerance
+                )
+            continue
+        
+        print(f"   📊 Error: {error:.2e}, Time: {exec_result['time']:.3f}s")
+        
+        # Step 7: 评测
+        if error > target_error:
+            status = 'FAIL'
+            fail_reason = f"ACCURACY_FAIL: error={error:.2e} > target={target_error:.2e}"
+        elif exec_result['time'] > target_time:
+            status = 'FAIL'
+            fail_reason = f"TIME_FAIL: time={exec_result['time']:.3f}s > target={target_time:.3f}s"
+        else:
+            status = 'PASS'
+            fail_reason = None
+        
+        print(f"   {'✅' if status == 'PASS' else '⚠️'} Status: {status}")
+        
+        # Gate 分析
+        gate_analyzer = GateAnalyzer()
+        gate_breakdown = gate_analyzer.analyze_single_case(
+            case_id=case_id,
+            exec_result={'success': True, 'error': error, 'time': exec_result['time']},
+            eval_result={
+                'target_error': target_error,
+                'target_time': target_time,
+                'fail_reason': fail_reason,
+                'status': status
+            },
+            oracle_info=oracle_info
+        )
+        
+        # 记录当前尝试
+        attempt_info = {
+            'attempt_num': attempt_num,
+            'code': solver_code,
+            'success': True,
+            'error': error,
+            'time': exec_result['time'],
+            'status': status,
+            'fail_reason': fail_reason,
+            'stdout': exec_result.get('stdout', ''),
+            'stderr': exec_result.get('stderr', ''),
+            'llm_usage': llm_usage,
+            'gate_breakdown': {
+                'exec_valid': gate_breakdown.exec_valid,
+                'accuracy_pass': gate_breakdown.accuracy_pass,
+                'time_pass': gate_breakdown.time_pass,
+                'final_pass': gate_breakdown.final_pass,
+                'failure_stage': gate_breakdown.failure_stage,
+                'failure_reason': gate_breakdown.failure_reason
+            }
+        }
+        all_attempts.append(attempt_info)
+        
+        # 记录 gate 转换
+        if attempt_num > 1 and all_attempts[-2].get('gate_breakdown'):
+            prev_gate = all_attempts[-2]['gate_breakdown']
+            curr_gate = attempt_info['gate_breakdown']
+            gate_transitions.append({
+                'from_attempt': attempt_num - 1,
+                'to_attempt': attempt_num,
+                'transition': {
+                    'exec_valid': f"{prev_gate['exec_valid']} → {curr_gate['exec_valid']}",
+                    'accuracy_pass': f"{prev_gate['accuracy_pass']} → {curr_gate['accuracy_pass']}",
+                    'time_pass': f"{prev_gate['time_pass']} → {curr_gate['time_pass']}",
+                    'final_pass': f"{prev_gate['final_pass']} → {curr_gate['final_pass']}"
+                },
+                'improvement': {
+                    'exec_valid': curr_gate['exec_valid'] and not prev_gate['exec_valid'],
+                    'accuracy_pass': curr_gate['accuracy_pass'] and not prev_gate['accuracy_pass'],
+                    'time_pass': curr_gate['time_pass'] and not prev_gate['time_pass'],
+                    'final_pass': curr_gate['final_pass'] and not prev_gate['final_pass']
+                }
+            })
+        
+        # 如果通过，提前退出
+        if status == 'PASS':
+            print(f"   🎉 Case passed on attempt {attempt_num}!")
+            break
+        
+        # 如果是最后一次尝试，退出循环
+        if attempt_num == max_attempts:
+            print(f"   ⏹️  Reached max attempts ({max_attempts})")
+            break
+    
+    # ========================================================================
+    # 生成最终结果
+    # ========================================================================
+    
+    # 选择最佳尝试
+    best_attempt = _select_best_attempt(all_attempts)
+    
+    print(f"\n{'─'*60}")
+    print(f"📊 Best attempt: {best_attempt['attempt_num']}/{max_attempts}")
+    if best_attempt.get('status'):
+        print(f"   Status: {best_attempt['status']}")
+    if best_attempt.get('error') is not None:
+        print(f"   Error: {best_attempt['error']:.2e}")
+    if best_attempt.get('time') is not None:
+        print(f"   Time: {best_attempt['time']:.3f}s")
+    print(f"{'─'*60}")
+    
+    # 保存最佳 solver 代码
+    if best_attempt['code']:
+        (case_output / "solver.py").write_text(best_attempt['code'])
+    
+    # 构建最终结果
+    result = {
+        'case_id': case_id,
+        'equation_type': case.get('pde_classification', {}).get('equation_type', 'unknown'),
+        'status': best_attempt.get('status', 'FAIL'),
+        'error': best_attempt.get('error'),
+        'time': best_attempt.get('time'),
+        'oracle_error': oracle_info['error'],
+        'oracle_time': oracle_info['time'],
+        'tolerance': legacy_tolerance,
+        'accuracy_tolerance': accuracy_tolerance,
+        'time_tolerance': time_tolerance,
+        'target_error': target_error,
+        'target_time': target_time,
+        'fail_reason': best_attempt.get('fail_reason'),
+        'gate_breakdown': best_attempt.get('gate_breakdown', {
+            'exec_valid': False,
+            'accuracy_pass': False,
+            'time_pass': False,
+            'final_pass': False,
+            'failure_stage': 'exec',
+            'failure_reason': best_attempt.get('error_message', 'Unknown')
+        }),
+    }
+    
+    # 实验 2.1: 多轮迭代信息
+    result['multi_attempt_info'] = {
+        'max_attempts': max_attempts,
+        'num_attempts': len(all_attempts),
+        'best_attempt_num': best_attempt['attempt_num'],
+        'all_attempts': all_attempts,
+        'gate_transitions': gate_transitions,
+        'improvement_summary': _compute_improvement_summary(all_attempts)
+    }
+    
+    # 实验 4.6: 汇总 LLM 使用信息
+    total_llm_usage = _aggregate_llm_usage(all_attempts)
+    if total_llm_usage:
+        result['llm_usage'] = total_llm_usage
+    
+    # 计算各 math_type 子榜指标（仅当最佳尝试执行成功时）
+    if best_attempt.get('success') and exec_result.get('agent_output'):
+        math_types = case.get('pde_classification', {}).get('math_type', [])
+        math_type_metrics = {}
+        for mt in math_types:
+            computer = get_specialized_metrics_computer(
+                mt, exec_result['agent_output'], oracle_output, case
+            )
+            if computer is None:
+                continue
+            metrics = computer.compute({
+                'runtime_sec': best_attempt['time'],
+                'error': best_attempt['error'],
+                'test_params': {}
+            })
+            math_type_metrics[mt] = metrics
+        
+        if math_type_metrics:
+            result['math_types'] = math_types
+            result['math_type_metrics'] = math_type_metrics
+    
+    # 保存结果
+    with open(case_output / "result.json", 'w') as f:
+        json.dump(result, f, indent=2)
+    
+    return result
+
+
+# =============================================================================
 # 主流程
 # =============================================================================
 
@@ -619,22 +1345,44 @@ def run_benchmark(
         print(f"# Agent: {agent_name}")
         print(f"{'#'*80}")
         
-        agent_output = output_dir / agent_name
+        agent_output = output_dir / f"{agent_name}"
         agent_results = []
         
         for i, case in enumerate(cases, 1):
             print(f"\n[{i}/{len(cases)}]", end="")
-            result = run_single_case(
-                case=case,
-                agent_name=agent_name,
-                output_dir=agent_output,
-                oracle_cache_dir=oracle_cache_dir,
-                solver_path_override=solver_path,
-                skip_generation=skip_generation,
-                existing_solver_dir=existing_solver_dir,  # 传递批量评估目录
-                timeout=timeout,
-                max_attempts=max_attempts
+            
+            # 判断是否使用多轮迭代模式（实验 2.1）
+            use_multi_attempt = (
+                max_attempts > 1 and
+                solver_path is None and
+                not skip_generation and
+                existing_solver_dir is None
             )
+            
+            if use_multi_attempt:
+                # 使用多轮迭代函数
+                result = run_single_case_multi_attempt(
+                    case=case,
+                    agent_name=agent_name,
+                    output_dir=agent_output,
+                    oracle_cache_dir=oracle_cache_dir,
+                    timeout=timeout,
+                    max_attempts=max_attempts
+                )
+            else:
+                # 使用原始函数（单次尝试或预定义 solver）
+                result = run_single_case(
+                    case=case,
+                    agent_name=agent_name,
+                    output_dir=agent_output,
+                    oracle_cache_dir=oracle_cache_dir,
+                    solver_path_override=solver_path,
+                    skip_generation=skip_generation,
+                    existing_solver_dir=existing_solver_dir,
+                    timeout=timeout,
+                    max_attempts=max_attempts
+                )
+            
             agent_results.append(result)
         
         # 汇总统计
@@ -769,6 +1517,84 @@ def compute_summary(agent_name: str, results: List[Dict]) -> Dict:
             'tokens_per_case': int(total_tokens / len(llm_usages)) if llm_usages else 0,
         }
     
+    # 实验 2.1: 多轮迭代统计
+    multi_attempt_stats = None
+    multi_attempt_results = [r for r in results if 'multi_attempt_info' in r]
+    
+    if multi_attempt_results:
+        # 统计每轮的累计通过率
+        pass_rate_by_attempt = {}
+        gate_transitions_summary = {
+            'exec_fail_to_valid': 0,
+            'accuracy_fail_to_pass': 0,
+            'time_fail_to_pass': 0,
+            'any_improvement': 0
+        }
+        
+        for r in multi_attempt_results:
+            ma_info = r['multi_attempt_info']
+            all_attempts = ma_info.get('all_attempts', [])
+            
+            # 统计每轮尝试的通过情况
+            for attempt in all_attempts:
+                attempt_num = attempt['attempt_num']
+                if attempt_num not in pass_rate_by_attempt:
+                    pass_rate_by_attempt[attempt_num] = {'total': 0, 'passed': 0}
+                
+                pass_rate_by_attempt[attempt_num]['total'] += 1
+                if attempt.get('status') == 'PASS':
+                    pass_rate_by_attempt[attempt_num]['passed'] += 1
+            
+            # 统计 gate 转换
+            for transition in ma_info.get('gate_transitions', []):
+                if transition.get('improvement', {}).get('exec_valid'):
+                    gate_transitions_summary['exec_fail_to_valid'] += 1
+                if transition.get('improvement', {}).get('accuracy_pass'):
+                    gate_transitions_summary['accuracy_fail_to_pass'] += 1
+                if transition.get('improvement', {}).get('time_pass'):
+                    gate_transitions_summary['time_fail_to_pass'] += 1
+                
+                # 检查是否有任何改进
+                if any(transition.get('improvement', {}).values()):
+                    gate_transitions_summary['any_improvement'] += 1
+        
+        # 计算每轮的累计通过率
+        cumulative_pass_rate = {}
+        for attempt_num in sorted(pass_rate_by_attempt.keys()):
+            stats = pass_rate_by_attempt[attempt_num]
+            cumulative_pass_rate[f"attempt_{attempt_num}"] = {
+                'attempt_num': attempt_num,
+                'passed': stats['passed'],
+                'total': stats['total'],
+                'pass_rate': stats['passed'] / stats['total'] if stats['total'] > 0 else 0.0
+            }
+        
+        # 统计平均尝试次数
+        avg_attempts = np.mean([r['multi_attempt_info']['num_attempts'] for r in multi_attempt_results])
+        
+        # 统计成功案例的平均尝试次数
+        successful_results = [r for r in multi_attempt_results if r.get('status') == 'PASS']
+        avg_attempts_to_success = np.mean([
+            r['multi_attempt_info']['best_attempt_num'] 
+            for r in successful_results
+        ]) if successful_results else None
+        
+        # 统计改进情况
+        cases_with_improvement = sum(
+            1 for r in multi_attempt_results 
+            if r['multi_attempt_info'].get('improvement_summary', {}).get('any_improvement', False)
+        )
+        
+        multi_attempt_stats = {
+            'num_multi_attempt_cases': len(multi_attempt_results),
+            'avg_attempts': float(avg_attempts),
+            'avg_attempts_to_success': float(avg_attempts_to_success) if avg_attempts_to_success else None,
+            'pass_rate_by_attempt': cumulative_pass_rate,
+            'gate_transitions': gate_transitions_summary,
+            'cases_with_improvement': cases_with_improvement,
+            'improvement_rate': cases_with_improvement / len(multi_attempt_results) if multi_attempt_results else 0.0
+        }
+    
     return {
         'agent_name': agent_name,
         'timestamp': datetime.now().isoformat(),
@@ -781,6 +1607,7 @@ def compute_summary(agent_name: str, results: List[Dict]) -> Dict:
         'math_type_summary': math_type_summary,
         'gate_statistics': gate_statistics,  # 实验 4.1
         'cost_analysis': cost_analysis,      # 实验 4.6
+        'multi_attempt_stats': multi_attempt_stats,  # 实验 2.1
         'results': results
     }
 
@@ -871,6 +1698,36 @@ def print_summary(summary: Dict):
         if cost.get('cost_per_pass') is not None:
             print(f"  Cost/Pass:      ${cost['cost_per_pass']:.4f}")
         print(f"  Tokens/Case:    {cost['tokens_per_case']:,}")
+    
+    # 实验 2.1: 多轮迭代统计
+    if 'multi_attempt_stats' in summary and summary['multi_attempt_stats']:
+        ma_stats = summary['multi_attempt_stats']
+        print(f"\n{'─'*80}")
+        print(f"🔄 Multi-Attempt Statistics (实验 2.1)")
+        print(f"{'─'*80}")
+        print(f"  Total Multi-Attempt Cases: {ma_stats['num_multi_attempt_cases']}")
+        print(f"  Avg Attempts per Case:     {ma_stats['avg_attempts']:.2f}")
+        if ma_stats.get('avg_attempts_to_success'):
+            print(f"  Avg Attempts to Success:   {ma_stats['avg_attempts_to_success']:.2f}")
+        
+        # 每轮的累计通过率
+        if ma_stats.get('pass_rate_by_attempt'):
+            print(f"\n  Pass Rate by Attempt:")
+            for key in sorted(ma_stats['pass_rate_by_attempt'].keys()):
+                stats = ma_stats['pass_rate_by_attempt'][key]
+                print(f"    Attempt {stats['attempt_num']}: {stats['passed']}/{stats['total']} ({stats['pass_rate']:.1%})")
+        
+        # Gate 转换统计
+        if ma_stats.get('gate_transitions'):
+            gt = ma_stats['gate_transitions']
+            print(f"\n  Gate Transitions:")
+            print(f"    Exec-fail → Exec-valid:    {gt['exec_fail_to_valid']}")
+            print(f"    Accuracy-fail → Pass:      {gt['accuracy_fail_to_pass']}")
+            print(f"    Time-fail → Pass:          {gt['time_fail_to_pass']}")
+            print(f"    Total improvements:        {gt['any_improvement']}")
+        
+        # 改进情况
+        print(f"\n  Cases with Improvement:    {ma_stats['cases_with_improvement']}/{ma_stats['num_multi_attempt_cases']} ({ma_stats['improvement_rate']:.1%})")
     
     print(f"{'─'*80}")
 

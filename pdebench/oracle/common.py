@@ -294,9 +294,12 @@ def _eval_on_grid(
     xmin, xmax, ymin, ymax = bbox
     x_grid = np.linspace(xmin, xmax, nx)
     y_grid = np.linspace(ymin, ymax, ny)
-    xx, yy = np.meshgrid(x_grid, y_grid, indexing="ij")
+    # indexing="xy": xx[i,j]=x_grid[j], yy[i,j]=y_grid[i]
+    # result[i,j] = f(x_grid[j], y_grid[i])  →  row=y, col=x  (standard image convention)
+    # Models sample with the same "xy" convention, so oracle and agent grids are aligned.
+    xx, yy = np.meshgrid(x_grid, y_grid, indexing="xy")
 
-    points = np.zeros((nx * ny, 3))
+    points = np.zeros((ny * nx, 3))
     points[:, 0] = xx.ravel()
     points[:, 1] = yy.ravel()
 
@@ -316,7 +319,7 @@ def _eval_on_grid(
         values_eval = eval_fn(np.array(points_on_proc), np.array(cells_on_proc))
         values[eval_map] = values_eval
 
-    return x_grid, y_grid, values.reshape(nx, ny)
+    return x_grid, y_grid, values.reshape(ny, nx)
 
 
 def sample_scalar_on_grid(

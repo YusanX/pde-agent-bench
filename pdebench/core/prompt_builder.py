@@ -188,17 +188,26 @@ def generate_prompt(case: Dict, oracle_info: Optional[Dict] = None) -> str:
 """
 
     # 网格和输出配置
-    mesh_cfg = case['oracle_config']['mesh']
     output_cfg = case['oracle_config']['output']
-    grid_cfg = output_cfg.get('grid', {})
     output_field = output_cfg.get('field', 'scalar')
-    
+    eq_type = case.get('pde_classification', {}).get('equation_type', '')
+
+    # 向量场附加说明（仅线弹性等向量值PDE）
+    vector_field_note = ""
+    if eq_type == "linear_elasticity" or "displacement" in output_field:
+        vector_field_note = (
+            "\n- ⚠️  **Vector-valued problem**: your FEM space must be a **vector** Lagrange space "
+            "`(shape=(gdim,))`. The evaluated quantity is the **displacement magnitude** "
+            "`‖u‖ = √(u₁² + u₂²)`, not individual components. "
+            "For near-incompressible materials (ν > 0.4), use **P2 or higher** to avoid volumetric locking."
+        )
+
     prompt += f"""
 **Domain:** [0,1] × [0,1] (unit square)
 
 **Output Requirements (handled by evaluator):**
-- Evaluator will sample solution on a {grid_cfg.get('nx', 50)} × {grid_cfg.get('ny', 50)} uniform grid
-- Output field: {output_field}
+- Evaluator will sample the solution on a uniform grid (specific resolution is determined by the evaluator)
+- Output field: {output_field}{vector_field_note}
 
 ---
 
@@ -210,7 +219,9 @@ Write a Python module using **dolfinx** (FEniCSx) that exposes:
 def solve(case_spec: dict) -> dict:
     \"\"\"
     Return a dict with:
-    - "u": u_grid, numpy array with shape (nx, ny) - final solution
+    - "u": u_grid, 2-D numpy array of the solution sampled on a uniform grid.
+         Choose any grid resolution you find appropriate; the evaluator will
+         automatically resample your output to its reference grid before scoring.
     - "solver_info": dict with fields organized by PDE type:
     
       ALWAYS REQUIRED (all PDEs):

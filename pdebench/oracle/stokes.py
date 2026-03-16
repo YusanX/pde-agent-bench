@@ -7,7 +7,7 @@ from typing import Any, Dict
 import numpy as np
 import sympy as sp
 import ufl
-from dolfinx import fem
+from dolfinx import fem, mesh as dmesh
 from dolfinx.fem.petsc import LinearProblem
 from petsc4py import PETSc
 
@@ -73,10 +73,20 @@ def _build_dirichlet_bcs(
     bcs = []
     dirichlet_cfgs = _normalize_dirichlet_cfg(bc_cfg)
     V, _ = W.sub(0).collapse()
+    fdim = msh.topology.dim - 1
     for cfg in dirichlet_cfgs:
         on = cfg.get("on", "all")
-        selector = _boundary_selector(on, dim)
-        boundary_dofs = fem.locate_dofs_geometrical((W.sub(0), V), selector)
+        if on.lower() in {"all", "*"}:
+            # Topological approach: locate boundary facets first, then DOFs on those facets.
+            # locate_dofs_geometrical with np.ones(...) would incorrectly select ALL interior
+            # DOFs as Dirichlet, bypassing the FEM solve entirely.
+            facets = dmesh.locate_entities_boundary(
+                msh, fdim, lambda x: np.ones(x.shape[1], dtype=bool)
+            )
+            boundary_dofs = fem.locate_dofs_topological((W.sub(0), V), fdim, facets)
+        else:
+            selector = _boundary_selector(on, dim)
+            boundary_dofs = fem.locate_dofs_geometrical((W.sub(0), V), selector)
         value = cfg.get("value", "0.0")
         if isinstance(value, str) and value in {"u", "u_exact"}:
             if u_exact is None:
