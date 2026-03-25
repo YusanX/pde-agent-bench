@@ -47,11 +47,15 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from pdebench.core.prompt_builder import generate_prompt
+from pdebench.core.template_prompt_builder import generate_template_prompt, is_template_supported  # 实验 P2
 from pdebench.core.llm_client import call_llm, LLMClient
 from pdebench.core.feedback_prompt import create_feedback_prompt  # 实验 2.1: 多轮迭代
 from pdebench.metrics.specialized import get_specialized_metrics_computer
 from pdebench.analysis import GateAnalyzer, ErrorClassifier  # 实验 4.1, 4.5
 from pdebench.agents import AgentRegistry, get_agent  # 实验 1.2: Code Agent
+
+# 支持的 prompt 变体
+PROMPT_VARIANTS = ["standard", "template_guided"]
 
 
 # =============================================================================
@@ -275,7 +279,8 @@ def run_single_case(
     skip_generation: bool = False,
     existing_solver_dir: Optional[Path] = None,  # 新增：从已有目录读取solver
     timeout: int = 300,
-    max_attempts: int = 1  # 实验 2.1: 多轮迭代
+    max_attempts: int = 1,  # 实验 2.1: 多轮迭代
+    prompt_variant: str = "standard"  # 实验 P2: prompt 变体
 ) -> Dict:
     """运行单个case的完整流程"""
     
@@ -294,8 +299,15 @@ def run_single_case(
     oracle_info = run_oracle(case, oracle_cache_dir)
     _write_oracle_reference(case, oracle_info, oracle_output)
     
-    # Step 2: 生成prompt
-    prompt = generate_prompt(case, oracle_info)
+    # Step 2: 生成prompt（根据 variant 选择不同策略）
+    pde_type = case.get("oracle_config", {}).get("pde", {}).get("type", "")
+    if prompt_variant == "template_guided" and is_template_supported(pde_type):
+        prompt = generate_template_prompt(case, oracle_info)
+        print(f"   🧪 Prompt variant: template_guided (P2 experiment)")
+    else:
+        if prompt_variant == "template_guided":
+            print(f"   ⚠️  template_guided not supported for '{pde_type}', falling back to standard")
+        prompt = generate_prompt(case, oracle_info)
     (case_output / "prompt.md").write_text(prompt)
     
     # Step 3: 调用LLM/Agent或加载已有solver
@@ -305,15 +317,17 @@ def run_single_case(
     # 检测是否为 Code Agent
     is_code_agent = AgentRegistry.is_registered(agent_name)
     
+    _pv = prompt_variant  # shorthand for error result calls below
+
     if solver_path_override is not None:
         if not solver_path_override.exists():
-            return _make_error_result(case_id, 'SOLVER_NOT_FOUND', f"Solver path not found: {solver_path_override}", case_output=case_output, case=case)
+            return _make_error_result(case_id, 'SOLVER_NOT_FOUND', f"Solver path not found: {solver_path_override}", case_output=case_output, case=case, prompt_variant=_pv)
         solver_code = solver_path_override.read_text()
     elif existing_solver_dir is not None:
         # 从已有目录读取solver（批量评估模式）
         existing_solver_path = existing_solver_dir / case_id / "solver.py"
         if not existing_solver_path.exists():
-            return _make_error_result(case_id, 'SOLVER_NOT_FOUND', f"Solver not found in existing dir: {existing_solver_path}", case_output=case_output, case=case)
+            return _make_error_result(case_id, 'SOLVER_NOT_FOUND', f"Solver not found in existing dir: {existing_solver_path}", case_output=case_output, case=case, prompt_variant=_pv)
         print(f"   📂 Loading existing solver from: {existing_solver_path}")
         solver_code = existing_solver_path.read_text()
     elif skip_generation and solver_path.exists():
@@ -342,7 +356,7 @@ def run_single_case(
             if not response.success:
                 print(f"   ❌ Agent call failed: {response.error}")
                 agent.cleanup()
-                return _make_error_result(case_id, 'AGENT_ERROR', response.error, case_output=case_output, case=case)
+                return _make_error_result(case_id, 'AGENT_ERROR', response.error, case_output=case_output, case=case, prompt_variant=_pv)
             
             solver_code = response.code
             (case_output / "agent_response.txt").write_text(response.raw_response)
@@ -361,7 +375,7 @@ def run_single_case(
             print(f"   ❌ Agent call failed: {e}")
             import traceback
             traceback.print_exc()
-            return _make_error_result(case_id, 'AGENT_ERROR', str(e), case_output=case_output, case=case)
+            return _make_error_result(case_id, 'AGENT_ERROR', str(e), case_output=case_output, case=case, prompt_variant=_pv)
     else:
         # ⭐ 使用纯 LLM（实验 1.1）
         print(f"   🤖 Calling {agent_name} (LLM)...")
@@ -370,7 +384,7 @@ def run_single_case(
             
             if not response.success:
                 print(f"   ❌ LLM call failed: {response.error}")
-                return _make_error_result(case_id, 'LLM_ERROR', response.error, case_output=case_output, case=case)
+                return _make_error_result(case_id, 'LLM_ERROR', response.error, case_output=case_output, case=case, prompt_variant=_pv)
             
             solver_code = response.code
             (case_output / "llm_response.txt").write_text(response.raw_response)
@@ -380,7 +394,7 @@ def run_single_case(
                 
         except Exception as e:
             print(f"   ❌ LLM call failed: {e}")
-            return _make_error_result(case_id, 'LLM_ERROR', str(e), case_output=case_output, case=case)
+            return _make_error_result(case_id, 'LLM_ERROR', str(e), case_output=case_output, case=case, prompt_variant=_pv)
     
     # Step 4: 执行solver
     print(f"   🔧 Executing solver...")
@@ -388,14 +402,14 @@ def run_single_case(
     
     if not exec_result['success']:
         print(f"   ❌ Execution failed: {exec_result.get('error_message', 'Unknown')[:100]}")
-        return _make_error_result(case_id, 'EXECUTION_ERROR', exec_result.get('error_message'), exec_result.get('stderr'), case_output=case_output, case=case)
+        return _make_error_result(case_id, 'EXECUTION_ERROR', exec_result.get('error_message'), exec_result.get('stderr'), case_output=case_output, case=case, prompt_variant=_pv)
     
     # Step 5: 计算误差
     error = compute_error(exec_result['agent_output'], oracle_info)
     
     if np.isnan(error):
         print(f"   ❌ Error computation failed")
-        return _make_error_result(case_id, 'EVALUATION_ERROR', 'Error computation returned NaN', case_output=case_output, case=case)
+        return _make_error_result(case_id, 'EVALUATION_ERROR', 'Error computation returned NaN', case_output=case_output, case=case, prompt_variant=_pv)
     
     print(f"   📊 Error: {error:.2e}, Time: {exec_result['time']:.3f}s")
     
@@ -426,7 +440,8 @@ def run_single_case(
     # 保存结果
     result = {
         'case_id': case_id,
-        'equation_type': case.get('pde_classification', {}).get('equation_type', 'unknown'),  # 添加equation_type
+        'equation_type': case.get('pde_classification', {}).get('equation_type', 'unknown'),
+        'prompt_variant': prompt_variant,  # 实验 P2: 记录使用的 prompt 变体
         'status': status,
         'error': error,
         'time': exec_result['time'],
@@ -492,11 +507,12 @@ def run_single_case(
     return result
 
 
-def _make_error_result(case_id: str, status: str, error_msg: str, stderr: str = None, case_output: Path = None, case: Dict = None) -> Dict:
+def _make_error_result(case_id: str, status: str, error_msg: str, stderr: str = None, case_output: Path = None, case: Dict = None, prompt_variant: str = "standard") -> Dict:
     """创建错误结果并写入 result.json"""
     result = {
         'case_id': case_id,
-        'equation_type': case.get('pde_classification', {}).get('equation_type', 'unknown') if case else 'unknown',  # 添加equation_type
+        'equation_type': case.get('pde_classification', {}).get('equation_type', 'unknown') if case else 'unknown',
+        'prompt_variant': prompt_variant,  # 实验 P2
         'status': status,
         'error_message': error_msg
     }
@@ -1275,7 +1291,8 @@ def run_benchmark(
     skip_generation: bool = False,
     existing_solver_dir: Optional[Path] = None,  # 新增：批量评估已有solver目录
     timeout: int = 300,
-    max_attempts: int = 1  # 实验 2.1
+    max_attempts: int = 1,  # 实验 2.1
+    prompt_variant: str = "standard"  # 实验 P2: "standard" 或 "template_guided"
 ):
     """运行完整benchmark"""
     
@@ -1286,6 +1303,7 @@ def run_benchmark(
     print(f"📁 Output: {output_dir}")
     print(f"🤖 Agents: {', '.join(agents)}")
     print(f"⏱️  Timeout: {timeout}s")
+    print(f"🧪 Prompt Variant: {prompt_variant}")
     if existing_solver_dir:
         print(f"📂 Batch Eval Mode: {existing_solver_dir}")
     print("="*80)
@@ -1380,7 +1398,8 @@ def run_benchmark(
                     skip_generation=skip_generation,
                     existing_solver_dir=existing_solver_dir,
                     timeout=timeout,
-                    max_attempts=max_attempts
+                    max_attempts=max_attempts,
+                    prompt_variant=prompt_variant
                 )
             
             agent_results.append(result)
@@ -1811,6 +1830,16 @@ def main():
         default=1,
         help='Maximum attempts per case for multi-attempt mode (default: 1, use 3 for Experiment 2.1)'
     )
+
+    parser.add_argument(
+        '--prompt-variant',
+        choices=PROMPT_VARIANTS,
+        default='standard',
+        help=(
+            'Prompt variant for P2 (API Decoupling) experiment (default: standard). '
+            '"template_guided" provides DOLFINx skeleton; model fills in only variational form, BCs, and numerical params.'
+        )
+    )
     
     args = parser.parse_args()
     
@@ -1850,9 +1879,10 @@ def main():
         equation_types=args.equation_types,
         solver_path=args.solver_path,
         skip_generation=args.skip_generation,
-        existing_solver_dir=existing_solver_dir,  # 传递批量评估目录
+        existing_solver_dir=existing_solver_dir,
         timeout=args.timeout,
-        max_attempts=args.max_attempts
+        max_attempts=args.max_attempts,
+        prompt_variant=args.prompt_variant
     )
 
 
