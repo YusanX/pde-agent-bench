@@ -214,144 +214,202 @@ def _manufactured_f_and_bc(msh, V, pde_cfg: dict, kappa_spec: dict):
 '''
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PDE-specific skeleton bodies
+# Poisson: case-specific dynamic skeleton (PDE data inlined at prompt-gen time)
 # ─────────────────────────────────────────────────────────────────────────────
 
-_POISSON_SKELETON = '''
-def solve(case_spec: dict) -> dict:
-    # ── NUMERICAL PARAMETERS  (YOUR CHOICES) ─────────────────────────────
-    N        = 64       # mesh resolution — try: 32, 64, 128, 256
-    degree   = 1        # FE polynomial degree — try: 1, 2, 3
-    ksp_type = "cg"     # linear solver — "cg" or "gmres"
-    pc_type  = "hypre"  # preconditioner — "hypre", "ilu", "jacobi"
-    rtol     = 1e-8     # relative tolerance
+def _build_poisson_skeleton(case: Dict) -> str:
+    """
+    Generate a Poisson skeleton with ALL PDE math data pre-filled.
+    The model only writes: variational form a, L + numerical parameter choices.
+    No case_spec access needed at runtime.
+    """
+    pde_cfg    = case["oracle_config"]["pde"]
+    kappa_spec = pde_cfg.get("coefficients", {}).get("kappa",
+                                                     {"type": "constant", "value": 1.0})
+    manufactured = pde_cfg.get("manufactured_solution", {})
+    out_cfg    = case["oracle_config"]["output"]["grid"]
+    nx, ny     = out_cfg["nx"], out_cfg["ny"]
 
-    # ── SETUP  (PROVIDED) ────────────────────────────────────────────────
-    msh = _dmesh.create_unit_square(MPI.COMM_WORLD, N, N)
-    V   = fem.functionspace(msh, ("Lagrange", degree))
-    x   = ufl.SpatialCoordinate(msh)
-
-    # ── PDE DATA  (YOUR CODE) ────────────────────────────────────────────
-    # case_spec['pde'] contains:
-    #   'coefficients': {'kappa': {'type': 'constant'|'expr'|'piecewise_x', ...}}
-    #   'manufactured_solution': {'u': '<string>'} — if present, derive f and BC
-    #   'source_term': '<string>'                  — if no manufactured solution
-    #
-    # Helpers provided:
-    #   _kappa_from_spec(msh, kappa_spec)       → UFL/fem κ expression
-    #   _manufactured_f_and_bc(msh, V, pde_cfg, kappa_spec) → (f_h, bc)
-    #   _f_from_str(msh, expr_str)              → UFL/fem f expression
-    #   _bc_from_str(msh, V, expr_str)          → fem.DirichletBC
-
-    pde_cfg    = case_spec["pde"]
-    kappa_spec = pde_cfg.get("coefficients", {}).get("kappa", {"type": "constant", "value": 1.0})
-    kappa      = _kappa_from_spec(msh, kappa_spec)
-
-    if "manufactured_solution" in pde_cfg and "u" in pde_cfg["manufactured_solution"]:
-        f_h, bc = _manufactured_f_and_bc(msh, V, pde_cfg, kappa_spec)
+    # Cell type for mesh creation
+    cell_type_str = case["oracle_config"]["mesh"].get("cell_type", "triangle")
+    if cell_type_str == "quadrilateral":
+        mesh_call = "    msh = _dmesh.create_unit_square(MPI.COMM_WORLD, N, N,\n" \
+                    "               cell_type=_dmesh.CellType.quadrilateral)"
     else:
-        f_str = pde_cfg.get("source_term", "0.0")
-        bc_str = pde_cfg.get("bc", {}).get("dirichlet", {}).get("value", "0.0")
-        f_h = _f_from_str(msh, f_str)
-        bc  = _bc_from_str(msh, V, bc_str)
+        mesh_call = "    msh = _dmesh.create_unit_square(MPI.COMM_WORLD, N, N)"
 
-    # ── VARIATIONAL FORM  (YOUR CODE) ────────────────────────────────────
-    # PDE:  -∇·(κ ∇u) = f  in Ω,   u = g  on ∂Ω
-    # Weak form:  ∫ κ ∇u·∇v dx = ∫ f v dx   ∀ v
+    # PDE data section — fully pre-filled, no case_spec needed
+    kappa_repr = repr(kappa_spec)
+    if manufactured.get("u"):
+        u_str = manufactured["u"]
+        pde_data = (
+            f"    # PDE data (pre-filled — do not modify):\n"
+            f"    kappa   = _kappa_from_spec(msh, {kappa_repr})\n"
+            f"    f_h, bc = _manufactured_f_and_bc(\n"
+            f"        msh, V,\n"
+            f"        {{'manufactured_solution': {{'u': {repr(u_str)}}}}},\n"
+            f"        {kappa_repr}\n"
+            f"    )"
+        )
+    else:
+        f_str  = pde_cfg.get("source_term", "0.0")
+        bc_val = pde_cfg.get("bc", {}).get("dirichlet", {}).get("value", "0.0")
+        pde_data = (
+            f"    # PDE data (pre-filled — do not modify):\n"
+            f"    kappa = _kappa_from_spec(msh, {kappa_repr})\n"
+            f"    f_h   = _f_from_str(msh, {repr(f_str)})\n"
+            f"    bc    = _bc_from_str(msh, V, {repr(bc_val)})"
+        )
+
+    return f'''
+def solve(case_spec: dict) -> dict:
+    # ── NUMERICAL PARAMETERS  (← YOUR CHOICES, no defaults given) ────────
+    N        = None  # ← choose mesh resolution (integer)
+    degree   = None  # ← choose FE polynomial degree: 1, 2, or 3
+    ksp_type = None  # ← choose linear solver: "cg" or "gmres"
+    pc_type  = None  # ← choose preconditioner: "hypre", "ilu", or "jacobi"
+    rtol     = None  # ← choose relative tolerance
+
+    # ── SETUP  (PROVIDED — do not modify) ────────────────────────────────
+{mesh_call}
+    V   = fem.functionspace(msh, ("Lagrange", degree))
+
+{pde_data}
+
+    # ── VARIATIONAL FORM  (← YOUR CODE) ──────────────────────────────────
+    # PDE:  -∇·(κ ∇u) = f  in Ω,   u = g on ∂Ω
+    # Weak form:  find u ∈ V s.t.  ∫ κ ∇u·∇v dx = ∫ f v dx   ∀ v ∈ V
     u_t = ufl.TrialFunction(V)
     v   = ufl.TestFunction(V)
 
-    a = ...   # TODO: bilinear form a(u,v)
-    L = ...   # TODO: linear form L(v)
+    a = ...   # ← YOUR CODE: bilinear form a(u, v)
+    L = ...   # ← YOUR CODE: linear form L(v)
 
-    # ── SOLVE  (PROVIDED) ────────────────────────────────────────────────
-    u_h = LinearProblem(a, L, bcs=[bc], petsc_options={
-        "ksp_type": ksp_type, "pc_type": pc_type, "ksp_rtol": rtol,
-    }).solve()
+    # ── SOLVE  (PROVIDED — do not modify) ────────────────────────────────
+    u_h = LinearProblem(a, L, bcs=[bc],
+                        petsc_options={{"ksp_type": ksp_type, "pc_type": pc_type, "ksp_rtol": rtol}},
+                        petsc_options_prefix="p2_poisson_").solve()
 
-    # ── OUTPUT  (PROVIDED) ───────────────────────────────────────────────
-    out = case_spec["output"]["grid"]
-    return {
-        "u": _sample_scalar(u_h, out["nx"], out["ny"]),
-        "solver_info": {"mesh_resolution": N, "element_degree": degree,
-                        "ksp_type": ksp_type, "pc_type": pc_type, "rtol": rtol},
-    }
+    # ── OUTPUT  (PROVIDED — do not modify) ───────────────────────────────
+    return {{
+        "u": _sample_scalar(u_h, {nx}, {ny}),
+        "solver_info": {{"mesh_resolution": N, "element_degree": degree,
+                        "ksp_type": ksp_type, "pc_type": pc_type, "rtol": rtol}},
+    }}
 '''
 
-_HEAT_SKELETON = '''
-def solve(case_spec: dict) -> dict:
-    # ── NUMERICAL PARAMETERS  (YOUR CHOICES) ─────────────────────────────
-    N           = 64            # mesh resolution
-    degree      = 1             # FE polynomial degree
-    dt          = 0.01          # time step — match or improve on case_spec suggestion
-    time_scheme = "backward_euler"  # "backward_euler" or "crank_nicolson"
-    ksp_type    = "cg"
-    pc_type     = "hypre"
-    rtol        = 1e-8
 
-    # ── SETUP  (PROVIDED) ────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Heat: case-specific dynamic skeleton (PDE data inlined at prompt-gen time)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_heat_skeleton(case: Dict) -> str:
+    """
+    Generate a Heat skeleton with ALL PDE math data pre-filled.
+    The model writes: variational form a, L + time-loop + numerical choices.
+    No case_spec access needed at runtime.
+    """
+    pde_cfg    = case["oracle_config"]["pde"]
+    kappa_spec = pde_cfg.get("coefficients", {}).get("kappa",
+                                                     {"type": "constant", "value": 1.0})
+    manufactured = pde_cfg.get("manufactured_solution", {})
+    time_cfg   = pde_cfg.get("time", {})
+    t_end      = float(time_cfg.get("t_end", 1.0))
+    ic_str     = pde_cfg.get("initial_condition", "0.0")
+    out_cfg    = case["oracle_config"]["output"]["grid"]
+    nx, ny     = out_cfg["nx"], out_cfg["ny"]
+
+    kappa_repr = repr(kappa_spec)
+    if manufactured.get("u"):
+        u_str = manufactured["u"]
+        pde_data = (
+            f"    # PDE data (pre-filled — do not modify):\n"
+            f"    kappa   = _kappa_from_spec(msh, {kappa_repr})\n"
+            f"    f_h, bc = _manufactured_f_and_bc(\n"
+            f"        msh, V,\n"
+            f"        {{'manufactured_solution': {{'u': {repr(u_str)}}}}},\n"
+            f"        {kappa_repr}\n"
+            f"    )"
+        )
+    else:
+        f_str  = pde_cfg.get("source_term", "0.0")
+        bc_val = pde_cfg.get("bc", {}).get("dirichlet", {}).get("value", "0.0")
+        pde_data = (
+            f"    # PDE data (pre-filled — do not modify):\n"
+            f"    kappa = _kappa_from_spec(msh, {kappa_repr})\n"
+            f"    f_h   = _f_from_str(msh, {repr(f_str)})\n"
+            f"    bc    = _bc_from_str(msh, V, {repr(bc_val)})"
+        )
+
+    # Initial condition
+    ic_code = (
+        f"    u_n = fem.Function(V)\n"
+        f"    u_n.interpolate(lambda pts: __import__('sympy').lambdify(\n"
+        f"        (__import__('sympy').symbols('x y')),\n"
+        f"        __import__('sympy').sympify({repr(ic_str)},\n"
+        f"            locals={{'x': __import__('sympy').Symbol('x'),\n"
+        f"                     'y': __import__('sympy').Symbol('y'),\n"
+        f"                     'pi': __import__('sympy').pi}}),\n"
+        f"        modules='numpy')(pts[0], pts[1]).astype(float))"
+    )
+    # Simplified: just use _bc_from_str logic for IC
+    ic_code = (
+        f"    # Initial condition (pre-filled — do not modify):\n"
+        f"    u_n = fem.Function(V)\n"
+        f"    _ic = _bc_from_str(msh, V, {repr(ic_str)})  # reuse BC helper for interpolation\n"
+        f"    u_n.x.array[:] = _ic.g.x.array[:]  # copy interpolated values"
+        if ic_str != "0.0" else
+        f"    # Initial condition (pre-filled — do not modify):\n"
+        f"    u_n = fem.Function(V)  # zero initial condition"
+    )
+
+    return f'''
+def solve(case_spec: dict) -> dict:
+    # ── NUMERICAL PARAMETERS  (← YOUR CHOICES, no defaults given) ────────
+    N           = None  # ← choose mesh resolution (integer)
+    degree      = None  # ← choose FE polynomial degree: 1, 2, or 3
+    dt          = None  # ← choose time step (float); t_end = {t_end}
+    time_scheme = None  # ← choose: "backward_euler" or "crank_nicolson"
+    ksp_type    = None  # ← choose linear solver: "cg" or "gmres"
+    pc_type     = None  # ← choose preconditioner: "hypre", "ilu", or "jacobi"
+    rtol        = None  # ← choose relative tolerance
+
+    # ── SETUP  (PROVIDED — do not modify) ────────────────────────────────
     msh = _dmesh.create_unit_square(MPI.COMM_WORLD, N, N)
     V   = fem.functionspace(msh, ("Lagrange", degree))
-    x   = ufl.SpatialCoordinate(msh)
 
-    # ── PDE DATA  (YOUR CODE) ────────────────────────────────────────────
-    # case_spec['pde'] contains:
-    #   'coefficients': {'kappa': ...}
-    #   'manufactured_solution': {'u': '<string>'}  or  'source_term': '<string>'
-    #   'time': {'t_end': ..., 'dt': ..., 'scheme': ...}
-    #   'initial_condition': '<string>'   (may be present)
-    #
-    # Helpers: _kappa_from_spec, _f_from_str, _bc_from_str
+{pde_data}
 
-    pde_cfg    = case_spec["pde"]
-    time_cfg   = pde_cfg["time"]
-    t_end      = float(time_cfg.get("t_end", 1.0))
-    dt_suggest = float(time_cfg.get("dt", 0.01))
-    dt         = dt_suggest     # or override with your choice above
+{ic_code}
 
-    kappa_spec = pde_cfg.get("coefficients", {}).get("kappa", {"type": "constant", "value": 1.0})
-    kappa      = _kappa_from_spec(msh, kappa_spec)
-
-    # TODO: define f_expr and bc (time-dependent or steady forcing + BCs)
-    f_h = ...   # TODO: source term (fem.Function or UFL)
-    bc  = ...   # TODO: Dirichlet BC (use _bc_from_str or _manufactured_f_and_bc)
-
-    # ── INITIAL CONDITION  (YOUR CODE) ───────────────────────────────────
-    u_n = fem.Function(V)   # solution at previous time step
-    # TODO: set initial condition u_n from case_spec['pde'].get('initial_condition')
-    # e.g.:  ic_str = pde_cfg.get('initial_condition', '0.0')
-    #        u_n = ... (interpolate ic_str into u_n)
-
-    # ── VARIATIONAL FORM  (YOUR CODE) ────────────────────────────────────
-    # PDE:  ∂u/∂t - ∇·(κ ∇u) = f
-    # Backward Euler:  (u-u_n)/dt - ∇·(κ ∇u) = f
-    # Weak form:  ∫ u v dx + dt ∫ κ ∇u·∇v dx = ∫ (u_n + dt*f) v dx
+    # ── VARIATIONAL FORM  (← YOUR CODE) ──────────────────────────────────
+    # PDE:  ∂u/∂t - ∇·(κ ∇u) = f   in Ω × (0, {t_end}]
+    # Discretise time with your chosen scheme.
+    # For Backward Euler weak form:
+    #   ∫ u v dx + dt ∫ κ ∇u·∇v dx = ∫ u_n v dx + dt ∫ f v dx   ∀ v
     u_t = ufl.TrialFunction(V)
     v   = ufl.TestFunction(V)
 
-    a = ...   # TODO: bilinear form (includes time-stepping mass term)
-    L = ...   # TODO: linear form   (includes u_n contribution)
+    a = ...   # ← YOUR CODE: bilinear form (must include mass term for time-stepping)
+    L = ...   # ← YOUR CODE: linear form   (must include u_n term)
 
-    # ── TIME LOOP  (YOUR CODE) ───────────────────────────────────────────
-    n_steps = max(1, round(t_end / dt))
+    # ── TIME LOOP  (PROVIDED structure — fill in the solve call) ─────────
+    n_steps = max(1, round({t_end} / dt))
     u_h = fem.Function(V)
 
     for _ in range(n_steps):
-        # TODO: reassemble L if f is time-dependent, solve, update u_n
-        u_h = LinearProblem(a, L, bcs=[bc], petsc_options={
-            "ksp_type": ksp_type, "pc_type": pc_type, "ksp_rtol": rtol,
-        }).solve()
-        u_n.x.array[:] = u_h.x.array
+        u_h = LinearProblem(a, L, bcs=[bc],
+                            petsc_options={{"ksp_type": ksp_type, "pc_type": pc_type, "ksp_rtol": rtol}},
+                            petsc_options_prefix="p2_heat_").solve()
+        u_n.x.array[:] = u_h.x.array  # update previous step
 
-    # ── OUTPUT  (PROVIDED) ───────────────────────────────────────────────
-    out = case_spec["output"]["grid"]
-    return {
-        "u": _sample_scalar(u_h, out["nx"], out["ny"]),
-        "u_initial": _sample_scalar(u_n, out["nx"], out["ny"]),
-        "solver_info": {"mesh_resolution": N, "element_degree": degree,
+    # ── OUTPUT  (PROVIDED — do not modify) ───────────────────────────────
+    return {{
+        "u": _sample_scalar(u_h, {nx}, {ny}),
+        "solver_info": {{"mesh_resolution": N, "element_degree": degree,
                         "ksp_type": ksp_type, "pc_type": pc_type, "rtol": rtol,
-                        "dt": dt, "n_steps": n_steps, "time_scheme": time_scheme},
-    }
+                        "dt": dt, "n_steps": n_steps, "time_scheme": time_scheme}},
+    }}
 '''
 
 _CONVDIFF_SKELETON = '''
@@ -370,14 +428,14 @@ def solve(case_spec: dict) -> dict:
     x   = ufl.SpatialCoordinate(msh)
 
     # ── PDE DATA  (YOUR CODE) ────────────────────────────────────────────
-    # case_spec['pde']['pde_params'] contains:
+    # NOTE: case_spec["oracle_config"]["pde"]["pde_params"] contains:
     #   'epsilon': diffusion coefficient ε
     #   'beta': convection velocity [β_x, β_y]
-    # case_spec['pde'] may also have time parameters (check 'time' key)
+    # Check case_spec["oracle_config"]["pde"].get("time") for transient variant.
     #
     # Helpers: _manufactured_f_and_bc, _f_from_str, _bc_from_str
 
-    pde_cfg = case_spec["pde"]
+    pde_cfg = case_spec["oracle_config"]["pde"]
     params  = pde_cfg.get("pde_params", {})
     epsilon = float(params.get("epsilon", 0.01))
     beta_v  = params.get("beta", [1.0, 1.0])
@@ -403,7 +461,7 @@ def solve(case_spec: dict) -> dict:
     }).solve()
 
     # ── OUTPUT  (PROVIDED) ───────────────────────────────────────────────
-    out = case_spec["output"]["grid"]
+    out = case_spec["oracle_config"]["output"]["grid"]
     return {
         "u": _sample_scalar(u_h, out["nx"], out["ny"]),
         "solver_info": {"mesh_resolution": N, "element_degree": degree,
@@ -825,9 +883,8 @@ def solve(case_spec: dict) -> dict:
 '''
 
 # Map PDE type → skeleton
-_SKELETONS = {
-    "poisson":              _POISSON_SKELETON,
-    "heat":                 _HEAT_SKELETON,
+# Static skeletons (other PDE types — still use case_spec at runtime)
+_SKELETONS_STATIC = {
     "convection_diffusion": _CONVDIFF_SKELETON,
     "stokes":               _STOKES_SKELETON,
     "navier_stokes":        _NS_SKELETON,
@@ -837,6 +894,22 @@ _SKELETONS = {
     "darcy":                _DARCY_SKELETON,
     "reaction_diffusion":   _RXNDIFF_SKELETON,
 }
+
+# Dynamic skeleton builders (Poisson and Heat — PDE data inlined at generation time)
+_SKELETON_BUILDERS = {
+    "poisson": _build_poisson_skeleton,
+    "heat":    _build_heat_skeleton,
+}
+
+# All supported PDE types
+_SUPPORTED_PDE_TYPES = set(_SKELETONS_STATIC) | set(_SKELETON_BUILDERS)
+
+
+def _get_skeleton(pde_type: str, case: Dict) -> str:
+    """Return the skeleton code for a given PDE type and case."""
+    if pde_type in _SKELETON_BUILDERS:
+        return _SKELETON_BUILDERS[pde_type](case)
+    return _SKELETONS_STATIC.get(pde_type, _build_poisson_skeleton(case))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -975,7 +1048,7 @@ This focuses purely on mathematical / numerical reasoning, not API syntax.
 """
 
     # ── Utility code + skeleton ────────────────────────────────────────
-    skeleton = _SKELETONS.get(pde_type, _POISSON_SKELETON)
+    skeleton = _get_skeleton(pde_type, case)
     prompt += f"""
 ---
 
@@ -992,4 +1065,4 @@ This focuses purely on mathematical / numerical reasoning, not API syntax.
 
 def is_template_supported(pde_type: str) -> bool:
     """Return True if a template exists for this PDE type."""
-    return pde_type in _SKELETONS
+    return pde_type in _SUPPORTED_PDE_TYPES
