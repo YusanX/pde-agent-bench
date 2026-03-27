@@ -27,6 +27,22 @@ fenicsx = [
     "mpi4py>=4.1.1",
     "petsc4py>=3.24.2",
 ]
+firedrake = [
+    # Firedrake 需使用官方安装脚本安装，不通过 pip：
+    # curl -O https://raw.githubusercontent.com/firedrakeproject/firedrake/master/scripts/firedrake-install
+    # python3 firedrake-install
+    #
+    # 安装完成后激活虚拟环境：source firedrake/bin/activate
+    # 官方文档：https://www.firedrakeproject.org/download.html
+    #
+    # 以下仅为文档记录；实际安装请使用上述脚本
+    # "firedrake",   # 不可通过 pip 安装，注释掉
+]
+agents = [
+    "mini-swe-agent",
+    "openhands",
+]
+
 dev = [
     "pytest>=7.0",
     "pytest-xdist>=2.5",

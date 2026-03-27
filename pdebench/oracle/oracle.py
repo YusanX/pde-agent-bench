@@ -1,4 +1,9 @@
-"""Unified oracle entry point."""
+"""Unified oracle entry point.
+
+Supports multiple solver backends via the ``solver_library`` argument:
+- ``'dolfinx'`` (default): FEniCSx / DOLFINx
+- ``'firedrake'``: Firedrake (requires ``pip install firedrake``)
+"""
 from __future__ import annotations
 
 from typing import Any, Dict
@@ -19,7 +24,17 @@ from .reaction_diffusion import ReactionDiffusionSolver
 class OracleSolver:
     """Dispatch to PDE-specific ground-truth solvers."""
 
-    def solve(self, case_spec: Dict[str, Any]) -> OracleResult:
+    def solve(self, case_spec: Dict[str, Any], solver_library: str = "dolfinx") -> OracleResult:
+        if solver_library == "firedrake":
+            try:
+                from .firedrake_oracle import FiredrakeOracleSolver
+            except ImportError as e:
+                raise ImportError(
+                    "Firedrake oracle requires Firedrake to be installed. "
+                    "See https://www.firedrakeproject.org/download.html"
+                ) from e
+            return FiredrakeOracleSolver().solve(case_spec)
+
         pde_type = case_spec["pde"]["type"]
 
         if pde_type == "poisson":

@@ -78,14 +78,19 @@ def format_coefficient(coeff: Dict) -> str:
         return str(coeff)
 
 
-def generate_prompt(case: Dict, oracle_info: Optional[Dict] = None) -> str:
+def generate_prompt(
+    case: Dict,
+    oracle_info: Optional[Dict] = None,
+    solver_library: str = "dolfinx",
+) -> str:
     """
     为case生成完整的prompt
-    
+
     Args:
         case: benchmark.jsonl中的case配置
         oracle_info: oracle参考信息 {'error': float, 'time': float}
-    
+        solver_library: 'dolfinx' (default) | 'firedrake'
+
     Returns:
         给LLM的完整prompt字符串
     """
@@ -202,6 +207,12 @@ def generate_prompt(case: Dict, oracle_info: Optional[Dict] = None) -> str:
             "For near-incompressible materials (ν > 0.4), use **P2 or higher** to avoid volumetric locking."
         )
 
+    lib_name = (
+        "**Firedrake** (https://www.firedrakeproject.org)"
+        if solver_library == "firedrake"
+        else "**dolfinx** (FEniCSx)"
+    )
+
     prompt += f"""
 **Domain:** [0,1] × [0,1] (unit square)
 
@@ -213,7 +224,9 @@ def generate_prompt(case: Dict, oracle_info: Optional[Dict] = None) -> str:
 
 ## Implementation Requirements
 
-Write a Python module using **dolfinx** (FEniCSx) that exposes:
+Write a Python module using {lib_name} that exposes:
+"""
+    prompt += """
 
 ```python
 def solve(case_spec: dict) -> dict:
@@ -301,15 +314,22 @@ Notes:
 **Output only the complete, runnable Python code.** No explanations needed.
 """
 
-    # 附加 DOLFINX 0.10.0 指南（若存在）
-    guide_path = Path(__file__).resolve().parents[2] / "DOLFINX_GUIDE.md"
+    # 附加对应库的参考指南（若存在）
+    guide_root = Path(__file__).resolve().parents[2]
+    if solver_library == "firedrake":
+        guide_path = guide_root / "FIREDRAKE_GUIDE.md"
+        guide_title = "Firedrake API Reference Guide"
+    else:
+        guide_path = guide_root / "DOLFINX_GUIDE.md"
+        guide_title = "DOLFINX 0.10.0 Guide"
+
     if guide_path.exists():
         guide_text = guide_path.read_text()
         prompt += f"""
 
 ---
 
-## DOLFINX 0.10.0 Guide
+## {guide_title}
 
 {guide_text}
 """

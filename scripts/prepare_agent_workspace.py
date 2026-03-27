@@ -181,11 +181,15 @@ def prepare_single_case(
     # Step 2: 生成 prompt（与纯 LLM 完全一致）
     prompt = generate_prompt(case, oracle_info)
 
-    prompt += "## ⚠️ Security Constraints\n\n"
-    prompt += "**You do NOT have read access to reference solutions or test data.**\n\n"
-    prompt += "- You CANNOT view existing solver implementations or test data\n"
-    prompt += "- You CANNOT access oracle_output/ or any reference solutions\n"
-    prompt += "- Focus solely on implementing the solve() function based on the problem description\n"
+    prompt += "## ⚠️ Stricly follow the following constraints:\n\n"
+    prompt += "- Do not run any file finding or command execution commands in the terminal, ONLY create `solver.py` and other necessary files in the SAME directory as this `prompt.md`.(/results/openhands)\n"
+    prompt += "- You CANNOT access `oracle_output/` or any reference solutions.\n"
+    prompt += "- This run is NON-INTERACTIVE (no user will reply). DO NOT ask questions or request clarification.\n"
+    prompt += "- you **have no ACCESS** to the directory 'results/openhands_workspaces'\n"
+    prompt += "- Proceed with reasonable assumptions if anything is unspecified; do not pause.\n"
+    prompt += "- Your ONLY task: create/overwrite a file named `solver.py` and other necessary files mentioned above in the SAME directory as this `prompt.md`.(/results/openhands)\n"
+    prompt += "- `solver.py` must be complete, runnable Python and must define `solve(case_spec: dict) -> dict` exactly as required above.\n"
+    prompt += "- After writing `solver.py`, STOP. Do not output explanations, summaries, or extra files.\n"
     
     prompt_file = case_output / "prompt.md"
     prompt_file.write_text(prompt)

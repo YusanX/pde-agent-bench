@@ -121,14 +121,17 @@ def load_benchmark_cases(
 # Oracle求解器 (v2 - 统一入口)
 # =============================================================================
 
-def run_oracle(case: Dict, cache_dir: Path) -> Dict:
+def run_oracle(case: Dict, cache_dir: Path, solver_library: str = "dolfinx") -> Dict:
     """
     运行 Oracle 求解器获取 baseline（带缓存）
     
     使用统一 OracleSolver，输出 L2 reference 和参考时间。
+    solver_library: 'dolfinx' (default) | 'firedrake'
     """
     case_id = case['id']
-    cache_file = cache_dir / f"{case_id}.json"
+    # 缓存 key 包含库名，避免不同库之间缓存混用
+    cache_suffix = f"_{solver_library}" if solver_library != "dolfinx" else ""
+    cache_file = cache_dir / f"{case_id}{cache_suffix}.json"
     
     # 检查缓存
     if cache_file.exists():
@@ -145,8 +148,8 @@ def run_oracle(case: Dict, cache_dir: Path) -> Dict:
         oracle = OracleSolver()
         oracle_config = case['oracle_config']
         
-        # 调用统一 Oracle 求解器
-        result = oracle.solve(oracle_config)
+        # 调用统一 Oracle 求解器（支持多库）
+        result = oracle.solve(oracle_config, solver_library=solver_library)
         
         # 构建缓存数据
         cached = {
@@ -273,9 +276,15 @@ def run_single_case(
     oracle_cache_dir: Path,
     solver_path_override: Optional[Path] = None,
     skip_generation: bool = False,
-    existing_solver_dir: Optional[Path] = None,  # 新增：从已有目录读取solver
+    existing_solver_dir: Optional[Path] = None,
     timeout: int = 300,
+<<<<<<< Updated upstream
     max_attempts: int = 1  # 实验 2.1: 多轮迭代
+=======
+    max_attempts: int = 1,
+    prompt_variant: str = "standard",
+    solver_library: str = "dolfinx",
+>>>>>>> Stashed changes
 ) -> Dict:
     """运行单个case的完整流程"""
     
@@ -291,11 +300,23 @@ def run_single_case(
     print(f"{'='*60}")
     
     # Step 1: 获取oracle参考解
-    oracle_info = run_oracle(case, oracle_cache_dir)
+    oracle_info = run_oracle(case, oracle_cache_dir, solver_library=solver_library)
     _write_oracle_reference(case, oracle_info, oracle_output)
     
+<<<<<<< Updated upstream
     # Step 2: 生成prompt
     prompt = generate_prompt(case, oracle_info)
+=======
+    # Step 2: 生成prompt（根据 variant 和 solver_library 选择策略）
+    pde_type = case.get("oracle_config", {}).get("pde", {}).get("type", "")
+    if prompt_variant == "template_guided" and is_template_supported(pde_type):
+        prompt = generate_template_prompt(case, oracle_info)
+        print(f"   🧪 Prompt variant: template_guided (P2 experiment)")
+    else:
+        if prompt_variant == "template_guided":
+            print(f"   ⚠️  template_guided not supported for '{pde_type}', falling back to standard")
+        prompt = generate_prompt(case, oracle_info, solver_library=solver_library)
+>>>>>>> Stashed changes
     (case_output / "prompt.md").write_text(prompt)
     
     # Step 3: 调用LLM/Agent或加载已有solver
@@ -767,7 +788,8 @@ def run_single_case_multi_attempt(
     output_dir: Path,
     oracle_cache_dir: Path,
     timeout: int = 300,
-    max_attempts: int = 3
+    max_attempts: int = 3,
+    solver_library: str = "dolfinx",
 ) -> Dict:
     """
     运行单个case的多轮迭代流程（实验 2.1）
@@ -803,11 +825,11 @@ def run_single_case_multi_attempt(
     print(f"{'='*60}")
     
     # Step 1: 获取 oracle 参考解
-    oracle_info = run_oracle(case, oracle_cache_dir)
+    oracle_info = run_oracle(case, oracle_cache_dir, solver_library=solver_library)
     _write_oracle_reference(case, oracle_info, oracle_output)
     
     # Step 2: 生成初始 prompt
-    original_prompt = generate_prompt(case, oracle_info)
+    original_prompt = generate_prompt(case, oracle_info, solver_library=solver_library)
     (case_output / "prompt_attempt_1.md").write_text(original_prompt)
     
     # 计算目标阈值
@@ -1273,9 +1295,15 @@ def run_benchmark(
     equation_types: Optional[List[str]] = None,
     solver_path: Optional[Path] = None,
     skip_generation: bool = False,
-    existing_solver_dir: Optional[Path] = None,  # 新增：批量评估已有solver目录
+    existing_solver_dir: Optional[Path] = None,
     timeout: int = 300,
+<<<<<<< Updated upstream
     max_attempts: int = 1  # 实验 2.1
+=======
+    max_attempts: int = 1,
+    prompt_variant: str = "standard",
+    solver_library: str = "dolfinx",
+>>>>>>> Stashed changes
 ):
     """运行完整benchmark"""
     
@@ -1286,6 +1314,11 @@ def run_benchmark(
     print(f"📁 Output: {output_dir}")
     print(f"🤖 Agents: {', '.join(agents)}")
     print(f"⏱️  Timeout: {timeout}s")
+<<<<<<< Updated upstream
+=======
+    print(f"🧪 Prompt Variant: {prompt_variant}")
+    print(f"📚 Solver Library: {solver_library}")
+>>>>>>> Stashed changes
     if existing_solver_dir:
         print(f"📂 Batch Eval Mode: {existing_solver_dir}")
     print("="*80)
@@ -1367,7 +1400,8 @@ def run_benchmark(
                     output_dir=agent_output,
                     oracle_cache_dir=oracle_cache_dir,
                     timeout=timeout,
-                    max_attempts=max_attempts
+                    max_attempts=max_attempts,
+                    solver_library=solver_library,
                 )
             else:
                 # 使用原始函数（单次尝试或预定义 solver）
@@ -1380,7 +1414,13 @@ def run_benchmark(
                     skip_generation=skip_generation,
                     existing_solver_dir=existing_solver_dir,
                     timeout=timeout,
+<<<<<<< Updated upstream
                     max_attempts=max_attempts
+=======
+                    max_attempts=max_attempts,
+                    prompt_variant=prompt_variant,
+                    solver_library=solver_library,
+>>>>>>> Stashed changes
                 )
             
             agent_results.append(result)
@@ -1811,6 +1851,29 @@ def main():
         default=1,
         help='Maximum attempts per case for multi-attempt mode (default: 1, use 3 for Experiment 2.1)'
     )
+<<<<<<< Updated upstream
+=======
+
+    parser.add_argument(
+        '--prompt-variant',
+        choices=PROMPT_VARIANTS,
+        default='standard',
+        help=(
+            'Prompt variant for P2 (API Decoupling) experiment (default: standard). '
+            '"template_guided" provides DOLFINx skeleton; model fills in only variational form, BCs, and numerical params.'
+        )
+    )
+
+    parser.add_argument(
+        '--solver-library',
+        choices=['dolfinx', 'firedrake'],
+        default='dolfinx',
+        help=(
+            'FEM library for oracle ground-truth and agent prompt (default: dolfinx). '
+            '"firedrake" requires Firedrake to be installed (https://www.firedrakeproject.org).'
+        )
+    )
+>>>>>>> Stashed changes
     
     args = parser.parse_args()
     
@@ -1852,7 +1915,13 @@ def main():
         skip_generation=args.skip_generation,
         existing_solver_dir=existing_solver_dir,  # 传递批量评估目录
         timeout=args.timeout,
+<<<<<<< Updated upstream
         max_attempts=args.max_attempts
+=======
+        max_attempts=args.max_attempts,
+        prompt_variant=args.prompt_variant,
+        solver_library=args.solver_library,
+>>>>>>> Stashed changes
     )
 
 

@@ -78,7 +78,7 @@ class LLMClient:
         'claude-opus-4.6': {'input': 5.00, 'output': 25.00},
         # Google
         'gemini-3.0-pro': {'input': 2, 'output': 12},
-        'gemini-3.1-pro'
+        'gemini-3.1-pro': {'input': 2, 'output': 12},
         # Qwen 
         'qwen3-max': {'input': 1.2, 'output': 6},
     }

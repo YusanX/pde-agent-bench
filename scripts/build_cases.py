@@ -23,11 +23,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from pdebench.templates.prompts import generate_description_md
 from pdebench.templates.scripts import generate_test_script
+from pdebench.metrics.tier_levels import generate_tiers_from_baseline
 
 
 def run_oracle(oracle_config: Dict[str, Any], case_id: str, entry: Dict[str, Any]) -> Dict[str, Any]:
     """
     运行 Oracle 求解器获取基准性能
+    
+    注意：使用高精度求解器参数（cg+hypre, rtol=1e-12）生成 baseline，
+    确保 ground truth 足够精确，支持三档难度的可达性验证。
     
     Returns:
         {
@@ -59,7 +63,26 @@ def run_oracle(oracle_config: Dict[str, Any], case_id: str, entry: Dict[str, Any
             
             # 运行三阶段 Oracle pipeline
             generate(oracle_config_full, tmppath)
-            solve_case(oracle_config_full, tmppath)
+            
+            # 读取 baseline_solver 配置（如果存在）
+            # 设计理念：使用"中等性能"求解器，给 Agent 留下优化空间
+            baseline_solver = oracle_config_full.get('baseline_solver', None)
+            if baseline_solver:
+                # 从配置文件读取
+                baseline_ksp_params = {
+                    'type': baseline_solver.get('ksp_type', 'cg'),
+                    'pc_type': baseline_solver.get('pc_type', 'jacobi'),
+                    'rtol': baseline_solver.get('rtol', 1e-8)
+                }
+                print(f"   ⚙️  Using baseline solver: {baseline_ksp_params['type']} + "
+                      f"{baseline_ksp_params['pc_type']} (rtol={baseline_ksp_params['rtol']:.0e})")
+            else:
+                # 如果没有配置，使用保守默认值（让 solver 自动选择）
+                baseline_ksp_params = None
+                print(f"   ⚙️  Using auto-selected solver")
+            
+            solve_case(oracle_config_full, tmppath, ksp_params=baseline_ksp_params)
+            
             metrics = evaluate(oracle_config_full, tmppath)
             
             # 读取元数据获取时间
@@ -89,13 +112,22 @@ def run_oracle(oracle_config: Dict[str, Any], case_id: str, entry: Dict[str, Any
         }
 
 
-def calculate_difficulty_tiers(baseline_error: float, baseline_time: float) -> Dict[str, Any]:
+def calculate_difficulty_tiers(
+    baseline_error: float, 
+    baseline_time: float,
+    difficulty_multipliers: Dict[str, Dict[str, float]]
+) -> Dict[str, Any]:
     """
     基于 Oracle 基准动态计算难度分级
     
     Args:
         baseline_error: Oracle 的参考误差
         baseline_time: Oracle 的参考时间
+        difficulty_multipliers: 难度系数配置，格式为：
+            {
+                'accuracy': {'level_1': 100, 'level_2': 1.0, 'level_3': 0.01},
+                'speed': {'fast': 0.1, 'medium': 1.0, 'slow': 10.0}
+            }
         
     Returns:
         {
@@ -111,36 +143,28 @@ def calculate_difficulty_tiers(baseline_error: float, baseline_time: float) -> D
             }
         }
     """
-    return {
-        'accuracy': {
-            'level_1': {
-                'target_error': baseline_error * 100,
-                'name': 'Low/Engineering'
-            },
-            'level_2': {
-                'target_error': baseline_error * 1.0,
-                'name': 'Medium/Standard'
-            },
-            'level_3': {
-                'target_error': baseline_error * 0.01,
-                'name': 'High/Scientific'
-            }
-        },
-        'speed': {
-            'fast': {
-                'time_budget': baseline_time * 0.1,
-                'name': 'Real-time'
-            },
-            'medium': {
-                'time_budget': baseline_time * 1.0,
-                'name': 'Interactive'
-            },
-            'slow': {
-                'time_budget': baseline_time * 10.0,
-                'name': 'Batch'
-            }
-        }
-    }
+    # 从字典格式转换为元组格式以供 generate_tiers_from_baseline 使用
+    accuracy_mult = difficulty_multipliers['accuracy']
+    speed_mult = difficulty_multipliers['speed']
+    
+    accuracy_multipliers = (
+        accuracy_mult['level_1'],
+        accuracy_mult['level_2'],
+        accuracy_mult['level_3']
+    )
+    
+    speed_multipliers = (
+        speed_mult['fast'],
+        speed_mult['medium'],
+        speed_mult['slow']
+    )
+    
+    return generate_tiers_from_baseline(
+        baseline_error,
+        baseline_time,
+        accuracy_multipliers,
+        speed_multipliers
+    )
 
 
 def build_case(entry: Dict[str, Any], output_dir: Path, skip_oracle: bool = False):
@@ -158,17 +182,47 @@ def build_case(entry: Dict[str, Any], output_dir: Path, skip_oracle: bool = Fals
     
     print(f"\n📁 Building case: {case_id}")
     
-    # Step 1: 运行 Oracle (或使用默认值)
+    # Step 1: 检查并读取难度系数配置
+    if 'difficulty_multipliers' not in entry:
+        raise ValueError(
+            f"Case '{case_id}' missing required field 'difficulty_multipliers' in benchmark.jsonl. "
+            f"Please add difficulty_multipliers with accuracy and speed configurations."
+        )
+    
+    difficulty_multipliers = entry['difficulty_multipliers']
+    
+    # 验证难度系数配置的完整性
+    required_fields = {
+        'accuracy': ['level_1', 'level_2', 'level_3'],
+        'speed': ['fast', 'medium', 'slow']
+    }
+    
+    for category, fields in required_fields.items():
+        if category not in difficulty_multipliers:
+            raise ValueError(
+                f"Case '{case_id}': difficulty_multipliers missing '{category}' category"
+            )
+        for field in fields:
+            if field not in difficulty_multipliers[category]:
+                raise ValueError(
+                    f"Case '{case_id}': difficulty_multipliers['{category}'] missing '{field}' field"
+                )
+    
+    # Step 2: 运行 Oracle (或使用默认值)
     if not skip_oracle:
         baseline = run_oracle(entry['oracle_config'], case_id, entry)
     else:
         print(f"   ⚡ Skipping Oracle (using default baseline)")
         baseline = {'error': 1e-2, 'time': 10.0}
     
-    # Step 2: 计算难度分级
-    difficulty_tiers = calculate_difficulty_tiers(baseline['error'], baseline['time'])
+    # Step 3: 计算难度分级
+    difficulty_tiers = calculate_difficulty_tiers(
+        baseline['error'], 
+        baseline['time'],
+        difficulty_multipliers
+    )
     
-    # Step 3: 构建完整 config.json
+    # Step 4: 构建完整 config.json
     full_config = {
         **entry,  # 包含所有源数据
         'baseline': {
@@ -187,7 +241,7 @@ def build_case(entry: Dict[str, Any], output_dir: Path, skip_oracle: bool = Fals
         json.dump(full_config, f, indent=2)
     print(f"   ✅ config.json")
     
-    # Step 4: 生成 description.md
+    # Step 5: 生成 description.md
     description = generate_description_md(
         entry,
         target_error=difficulty_tiers['accuracy']['level_2']['target_error'],
@@ -197,7 +251,7 @@ def build_case(entry: Dict[str, Any], output_dir: Path, skip_oracle: bool = Fals
         f.write(description)
     print(f"   ✅ description.md")
     
-    # Step 5: 生成测试脚本
+    # Step 6: 生成测试脚本
     for mode in ['fix_accuracy', 'fix_time']:
         script = generate_test_script(entry, mode)
         script_path = case_dir / f'test_{mode}.py'

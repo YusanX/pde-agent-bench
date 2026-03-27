@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
@@ -13,14 +12,7 @@ from dolfinx.mesh import CellType
 from mpi4py import MPI
 from petsc4py import PETSc
 
-
-@dataclass
-class OracleResult:
-    baseline_error: float
-    baseline_time: float
-    reference: np.ndarray
-    solver_info: Dict[str, Any]
-    num_dofs: int
+from ._types import OracleResult, compute_rel_L2_grid  # noqa: F401  re-export
 
 
 def create_mesh(domain_spec: Dict[str, Any], mesh_spec: Dict[str, Any]) -> mesh.Mesh:
@@ -267,19 +259,6 @@ def compute_L2_error(u_h: fem.Function, u_exact: fem.Function) -> float:
     if L2_exact_squared < 1e-15:
         return float(math.sqrt(L2_e_squared))
     return float(math.sqrt(L2_e_squared) / math.sqrt(L2_exact_squared))
-
-
-def compute_rel_L2_grid(u1: np.ndarray, u2: np.ndarray) -> float:
-    mask = ~(np.isnan(u1) | np.isnan(u2))
-    diff = (u1 - u2)[mask]
-    ref = u2[mask]
-    if diff.size == 0:
-        return float("nan")
-    l2_diff = math.sqrt(float(np.sum(diff**2)))
-    l2_ref = math.sqrt(float(np.sum(ref**2)))
-    if l2_ref < 1e-15:
-        return l2_diff
-    return l2_diff / l2_ref
 
 
 def _eval_on_grid(
