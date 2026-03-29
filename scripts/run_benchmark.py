@@ -58,6 +58,14 @@ from pdebench.agents import AgentRegistry, get_agent  # 实验 1.2: Code Agent
 # 数据加载
 # =============================================================================
 
+def _normalize_num_dofs(value):
+    """Convert scalar/tuple numpy dof counts to a JSON-safe total integer."""
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return int(sum(_normalize_num_dofs(v) for v in value))
+    return int(value)
+
 def load_agent_config(agent_name: str) -> Dict:
     """
     加载 Agent 配置文件
@@ -135,37 +143,51 @@ def run_oracle(case: Dict, cache_dir: Path, solver_library: str = "dolfinx") -> 
     
     # 检查缓存
     if cache_file.exists():
-        with open(cache_file) as f:
-            cached = json.load(f)
-        print(f"   ✅ Using cached oracle")
-        return cached
+        try:
+            with open(cache_file) as f:
+                cached = json.load(f)
+            print(f"   ✅ Using cached oracle")
+            return cached
+        except json.JSONDecodeError:
+            print(f"   ⚠️  Ignoring corrupted oracle cache, recomputing...")
+            cache_file.unlink(missing_ok=True)
     
     print(f"   🔮 Running oracle...")
     
     try:
-        from pdebench.oracle import OracleSolver
-        
-        oracle = OracleSolver()
+        if solver_library == "firedrake":
+            from pdebench.oracle.firedrake_oracle import FiredrakeOracleSolver
+
+            oracle = FiredrakeOracleSolver()
+        else:
+            from pdebench.oracle import OracleSolver
+
+            oracle = OracleSolver()
         oracle_config = case['oracle_config']
         
-        # 调用统一 Oracle 求解器（支持多库）
-        result = oracle.solve(oracle_config, solver_library=solver_library)
+        # Firedrake 和 DOLFINx 的 oracle 入口签名不同，按库分别调用。
+        if solver_library == "firedrake":
+            result = oracle.solve(oracle_config)
+        else:
+            result = oracle.solve(oracle_config, solver_library=solver_library)
         
         # 构建缓存数据
         cached = {
             'error': result.baseline_error,
             'time': result.baseline_time,
             'case_id': case_id,
-            'num_dofs': result.num_dofs,
+            'num_dofs': _normalize_num_dofs(result.num_dofs),
             'solver_info': result.solver_info,
             # 存储参考解（用于误差计算）
             'reference': result.reference.tolist(),
         }
         
-        # 保存缓存
+        # 保存缓存（原子写，避免中途失败留下半截 JSON）
         cache_dir.mkdir(parents=True, exist_ok=True)
-        with open(cache_file, 'w') as f:
+        tmp_cache_file = cache_file.with_suffix(cache_file.suffix + ".tmp")
+        with open(tmp_cache_file, 'w') as f:
             json.dump(cached, f, indent=2)
+        tmp_cache_file.replace(cache_file)
         
         print(f"   ✅ Oracle: error={result.baseline_error:.2e}, time={result.baseline_time:.3f}s")
         return cached
