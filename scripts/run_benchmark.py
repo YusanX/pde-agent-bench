@@ -278,13 +278,8 @@ def run_single_case(
     skip_generation: bool = False,
     existing_solver_dir: Optional[Path] = None,
     timeout: int = 300,
-<<<<<<< Updated upstream
-    max_attempts: int = 1  # 实验 2.1: 多轮迭代
-=======
     max_attempts: int = 1,
-    prompt_variant: str = "standard",
     solver_library: str = "dolfinx",
->>>>>>> Stashed changes
 ) -> Dict:
     """运行单个case的完整流程"""
     
@@ -303,20 +298,8 @@ def run_single_case(
     oracle_info = run_oracle(case, oracle_cache_dir, solver_library=solver_library)
     _write_oracle_reference(case, oracle_info, oracle_output)
     
-<<<<<<< Updated upstream
     # Step 2: 生成prompt
-    prompt = generate_prompt(case, oracle_info)
-=======
-    # Step 2: 生成prompt（根据 variant 和 solver_library 选择策略）
-    pde_type = case.get("oracle_config", {}).get("pde", {}).get("type", "")
-    if prompt_variant == "template_guided" and is_template_supported(pde_type):
-        prompt = generate_template_prompt(case, oracle_info)
-        print(f"   🧪 Prompt variant: template_guided (P2 experiment)")
-    else:
-        if prompt_variant == "template_guided":
-            print(f"   ⚠️  template_guided not supported for '{pde_type}', falling back to standard")
-        prompt = generate_prompt(case, oracle_info, solver_library=solver_library)
->>>>>>> Stashed changes
+    prompt = generate_prompt(case, oracle_info, solver_library=solver_library)
     (case_output / "prompt.md").write_text(prompt)
     
     # Step 3: 调用LLM/Agent或加载已有solver
@@ -1297,13 +1280,8 @@ def run_benchmark(
     skip_generation: bool = False,
     existing_solver_dir: Optional[Path] = None,
     timeout: int = 300,
-<<<<<<< Updated upstream
-    max_attempts: int = 1  # 实验 2.1
-=======
     max_attempts: int = 1,
-    prompt_variant: str = "standard",
     solver_library: str = "dolfinx",
->>>>>>> Stashed changes
 ):
     """运行完整benchmark"""
     
@@ -1314,11 +1292,7 @@ def run_benchmark(
     print(f"📁 Output: {output_dir}")
     print(f"🤖 Agents: {', '.join(agents)}")
     print(f"⏱️  Timeout: {timeout}s")
-<<<<<<< Updated upstream
-=======
-    print(f"🧪 Prompt Variant: {prompt_variant}")
     print(f"📚 Solver Library: {solver_library}")
->>>>>>> Stashed changes
     if existing_solver_dir:
         print(f"📂 Batch Eval Mode: {existing_solver_dir}")
     print("="*80)
@@ -1414,13 +1388,8 @@ def run_benchmark(
                     skip_generation=skip_generation,
                     existing_solver_dir=existing_solver_dir,
                     timeout=timeout,
-<<<<<<< Updated upstream
-                    max_attempts=max_attempts
-=======
                     max_attempts=max_attempts,
-                    prompt_variant=prompt_variant,
                     solver_library=solver_library,
->>>>>>> Stashed changes
                 )
             
             agent_results.append(result)
@@ -1851,18 +1820,6 @@ def main():
         default=1,
         help='Maximum attempts per case for multi-attempt mode (default: 1, use 3 for Experiment 2.1)'
     )
-<<<<<<< Updated upstream
-=======
-
-    parser.add_argument(
-        '--prompt-variant',
-        choices=PROMPT_VARIANTS,
-        default='standard',
-        help=(
-            'Prompt variant for P2 (API Decoupling) experiment (default: standard). '
-            '"template_guided" provides DOLFINx skeleton; model fills in only variational form, BCs, and numerical params.'
-        )
-    )
 
     parser.add_argument(
         '--solver-library',
@@ -1873,7 +1830,6 @@ def main():
             '"firedrake" requires Firedrake to be installed (https://www.firedrakeproject.org).'
         )
     )
->>>>>>> Stashed changes
     
     args = parser.parse_args()
     
@@ -1915,13 +1871,8 @@ def main():
         skip_generation=args.skip_generation,
         existing_solver_dir=existing_solver_dir,  # 传递批量评估目录
         timeout=args.timeout,
-<<<<<<< Updated upstream
-        max_attempts=args.max_attempts
-=======
         max_attempts=args.max_attempts,
-        prompt_variant=args.prompt_variant,
         solver_library=args.solver_library,
->>>>>>> Stashed changes
     )
 
 
