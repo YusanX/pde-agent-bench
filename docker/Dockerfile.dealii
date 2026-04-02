@@ -1,0 +1,64 @@
+# ============================================================================
+# pdebench/docker/Dockerfile.dealii
+#
+# 基础镜像：deal.II 官方镜像（Ubuntu 22.04 + deal.II 9.5）
+# 作用：提供 deal.II C++ 库环境，用于运行 deal.II oracle 和编译/执行 agent C++ solver
+#
+# 构建：
+#   docker build -t pdebench/dealii:latest -f docker/Dockerfile.dealii .
+#
+# 本镜像策略：
+#   - 不将项目代码烧入镜像，代码通过 volume 挂载（-v）在运行时注入
+#   - oracle C++ 二进制在 docker build 阶段预编译，节省运行时编译开销
+# ============================================================================
+
+FROM dealii/dealii:V9.5.2-jammy
+
+# ------ 系统依赖 ---------------------------------------------------------------
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+        python3 python3-pip \
+        nlohmann-json3-dev \
+        && \
+    rm -rf /var/lib/apt/lists/*
+
+# ------ Python 依赖（与宿主机 executor 解析 npz 输出一致）-----------------------
+RUN pip3 install --no-cache-dir numpy scipy sympy
+
+# ------ 工作目录 ---------------------------------------------------------------
+WORKDIR /workspace
+
+# ------ 预编译 oracle 二进制（build 阶段完成，避免运行时 cmake/make）--------------
+# 将项目代码临时 COPY 进来仅用于预编译，运行时通过 volume 挂载实际代码
+COPY pdebench/ /tmp/pdebench_build/pdebench/
+COPY pyproject.toml /tmp/pdebench_build/
+
+RUN pip3 install --no-cache-dir -e /tmp/pdebench_build 2>/dev/null || true && \
+    python3 - <<'EOF'
+import sys
+sys.path.insert(0, "/tmp/pdebench_build")
+from pdebench.oracle.dealii_oracle.common import ensure_built
+from pathlib import Path
+src = Path("/tmp/pdebench_build/pdebench/oracle/dealii_oracle/programs")
+bld = Path("/opt/dealii_oracle_build")
+bld.mkdir(parents=True, exist_ok=True)
+for pde in [
+    "poisson", "heat", "helmholtz", "stokes", "navier_stokes",
+    "convection_diffusion", "biharmonic", "linear_elasticity",
+    "reaction_diffusion",
+]:
+    print(f"[precompile] {pde} ...", flush=True)
+    ensure_built(src, bld, pde)
+print("[precompile] All oracle binaries built.", flush=True)
+EOF
+
+# 将预编译二进制移到固定路径，运行时不再需要源码
+ENV DEALII_ORACLE_PREBUILT_DIR=/opt/dealii_oracle_build
+
+# ------ 清理临时构建文件 -------------------------------------------------------
+RUN rm -rf /tmp/pdebench_build
+
+# ------ 默认入口 ---------------------------------------------------------------
+# 运行时由 docker_bridge.py 覆盖为：
+#   python -m pdebench.oracle.runner <case.json> <outdir> dealii
+CMD ["python3", "--version"]

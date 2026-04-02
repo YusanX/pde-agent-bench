@@ -1,0 +1,29 @@
+# ============================================================================
+# pdebench/docker/Dockerfile.firedrake
+#
+# 基础镜像：Firedrake 官方镜像
+# 作用：提供 Firedrake FEM 库环境，用于运行 Firedrake oracle 和 agent Python solver
+#
+# 构建：
+#   docker build -t pdebench/firedrake:latest -f docker/Dockerfile.firedrake .
+#
+# 本镜像策略：
+#   - 不将项目代码烧入镜像，代码通过 volume 挂载（-v）在运行时注入
+#   - Firedrake 已由官方镜像提供，无需编译
+# ============================================================================
+
+FROM firedrakeproject/firedrake:latest
+
+# ------ 切换到 root 安装额外依赖 -----------------------------------------------
+USER root
+
+RUN pip install --no-cache-dir numpy scipy sympy
+
+# ------ 工作目录 ---------------------------------------------------------------
+WORKDIR /workspace
+
+# ------ 默认入口 ---------------------------------------------------------------
+# 运行时由 docker_bridge.py 或 executor.py 覆盖为：
+#   python -m pdebench.oracle.runner <case.json> <outdir> firedrake
+#   python <runner.py> --script <solver.py> --case <case.json> --outdir <outdir>
+CMD ["python3", "--version"]

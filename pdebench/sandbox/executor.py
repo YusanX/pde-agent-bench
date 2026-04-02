@@ -195,6 +195,8 @@ def execute_agent_function(
     outdir: Path,
     case_spec: Dict[str, Any],
     timeout_sec: int = 300,
+    use_docker: bool = False,
+    docker_image: str = "pdebench/firedrake:latest",
 ) -> ExecutionResult:
     """
     Execute agent script by calling solve(case_spec) and let evaluator write outputs.
@@ -329,7 +331,7 @@ if __name__ == "__main__":
 """
     runner_path.write_text(runner_code)
 
-    cmd = [
+    _inner_cmd = [
         "python",
         str(runner_path),
         "--script",
@@ -339,6 +341,25 @@ if __name__ == "__main__":
         "--outdir",
         str(outdir),
     ]
+
+    if use_docker:
+        import shutil as _shutil
+        if _shutil.which("docker") is None:
+            raise FileNotFoundError(
+                "Docker is not installed or not found in PATH. "
+                "Please install Docker: https://docs.docker.com/get-docker/"
+            )
+        _project_root = str(Path(__file__).resolve().parents[2])
+        cmd = [
+            "docker", "run", "--rm",
+            "-v", f"{outdir}:{outdir}",
+            "-v", f"{script_path.parent}:{script_path.parent}",
+            "-v", f"{_project_root}:{_project_root}",
+            "-e", f"PYTHONPATH={_project_root}",
+            docker_image,
+        ] + _inner_cmd
+    else:
+        cmd = _inner_cmd
 
     t_start = time.time()
     timeout_occurred = False

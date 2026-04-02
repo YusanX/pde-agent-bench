@@ -207,11 +207,12 @@ def generate_prompt(
             "For near-incompressible materials (ν > 0.4), use **P2 or higher** to avoid volumetric locking."
         )
 
-    lib_name = (
-        "**Firedrake** (https://www.firedrakeproject.org)"
-        if solver_library == "firedrake"
-        else "**dolfinx** (FEniCSx)"
-    )
+    if solver_library == "dealii":
+        lib_name = "**deal.II** (https://www.dealii.org, C++ FEM library)"
+    elif solver_library == "firedrake":
+        lib_name = "**Firedrake** (https://www.firedrakeproject.org)"
+    else:
+        lib_name = "**dolfinx** (FEniCSx)"
 
     prompt += f"""
 **Domain:** [0,1] × [0,1] (unit square)
@@ -223,10 +224,66 @@ def generate_prompt(
 ---
 
 ## Implementation Requirements
+"""
 
+    # ── deal.II C++ 接口（与 Python 接口不同）──────────────────────────────
+    if solver_library == "dealii":
+        prompt += f"""
+Write a **C++** program using {lib_name} that:
+
+```cpp
+// Required interface:
+// argv[1]: path to case_spec.json  (contains the full case specification)
+// argv[2]: output directory        (already exists; write your output here)
+
+int main(int argc, char* argv[]) {{
+    // 1. Read case_spec.json with nlohmann/json
+    // 2. Build mesh, FE space, assemble, solve
+    // 3. Sample solution on uniform grid:
+    //      nx = case_spec["output"]["grid"]["nx"]  (int)
+    //      ny = case_spec["output"]["grid"]["ny"]  (int)
+    //      bbox = case_spec["output"]["grid"]["bbox"]  ([xmin,xmax,ymin,ymax])
+    // 4. Write output files:
+    //      argv[2]/solution_grid.bin  (float64, row-major [ny, nx])
+    //      argv[2]/meta.json          (see below)
+}}
+```
+
+**meta.json must contain:**
+```json
+{{
+  "nx": <int>,
+  "ny": <int>,
+  "wall_time_sec": <float>,
+  "solver_info": {{
+    "mesh_resolution": <int>,
+    "element_degree":  <int>,
+    "ksp_type":        "<str>",
+    "pc_type":         "<str>",
+    "rtol":            <float>
+  }}
+}}
+```
+
+**Grid ordering convention** (must match):
+- `solution_grid.bin` is a raw binary array of `ny × nx` float64 values
+- Row-major order: outer loop = y (row j), inner loop = x (col i)
+- `value[j*nx + i]` = u at point (x_lin[i], y_lin[j])
+- `x_lin = linspace(bbox[0], bbox[1], nx)`
+- `y_lin = linspace(bbox[2], bbox[3], ny)`
+
+**Alternatively**, you may write `solution.npz` (numpy format) with field `"u"` of shape (ny, nx).
+
+The evaluator provides:
+- `nlohmann/json` (header-only, `#include <nlohmann/json.hpp>`)
+- deal.II ≥ 9.3 (linked via CMake `deal_ii_setup_target`)
+"""
+    else:
+        # ── Python 接口（dolfinx / firedrake）─────────────────────────────
+        prompt += f"""
 Write a Python module using {lib_name} that exposes:
 """
-    prompt += """
+        prompt += """
 
 ```python
 def solve(case_spec: dict) -> dict:
@@ -308,7 +365,14 @@ Notes:
 - Time: wall_time_sec ≤ {target_time:.3f}s
 """
 
-    prompt += """
+    if solver_library == "dealii":
+        prompt += """
+---
+
+**Output only the complete, runnable C++ code.** No explanations needed.
+"""
+    else:
+        prompt += """
 ---
 
 **Output only the complete, runnable Python code.** No explanations needed.
@@ -316,7 +380,10 @@ Notes:
 
     # 附加对应库的参考指南（若存在）
     guide_root = Path(__file__).resolve().parents[2]
-    if solver_library == "firedrake":
+    if solver_library == "dealii":
+        guide_path = guide_root / "DEALII_GUIDE.md"
+        guide_title = "deal.II 9.x C++ API Reference Guide"
+    elif solver_library == "firedrake":
         guide_path = guide_root / "FIREDRAKE_GUIDE.md"
         guide_title = "Firedrake API Reference Guide"
     else:

@@ -58,14 +58,6 @@ from pdebench.agents import AgentRegistry, get_agent  # 实验 1.2: Code Agent
 # 数据加载
 # =============================================================================
 
-def _normalize_num_dofs(value):
-    """Convert scalar/tuple numpy dof counts to a JSON-safe total integer."""
-    if value is None:
-        return None
-    if isinstance(value, (list, tuple)):
-        return int(sum(_normalize_num_dofs(v) for v in value))
-    return int(value)
-
 def load_agent_config(agent_name: str) -> Dict:
     """
     加载 Agent 配置文件
@@ -129,65 +121,63 @@ def load_benchmark_cases(
 # Oracle求解器 (v2 - 统一入口)
 # =============================================================================
 
-def run_oracle(case: Dict, cache_dir: Path, solver_library: str = "dolfinx") -> Dict:
+def run_oracle(
+    case: Dict,
+    cache_dir: Path,
+    solver_library: str = "dolfinx",
+    use_docker: bool = False,
+    docker_image: str = None,
+) -> Dict:
     """
     运行 Oracle 求解器获取 baseline（带缓存）
-    
-    使用统一 OracleSolver，输出 L2 reference 和参考时间。
-    solver_library: 'dolfinx' (default) | 'firedrake'
+
+    solver_library: 'dolfinx' (default) | 'firedrake' | 'dealii'
+    use_docker:     为 True 时在 Docker 容器内运行（firedrake/dealii 无需本机安装）
+    docker_image:   覆盖默认镜像名
     """
     case_id = case['id']
-    # 缓存 key 包含库名，避免不同库之间缓存混用
+    # 缓存 key 包含库名和执行模式，避免混用
     cache_suffix = f"_{solver_library}" if solver_library != "dolfinx" else ""
     cache_file = cache_dir / f"{case_id}{cache_suffix}.json"
     
     # 检查缓存
     if cache_file.exists():
-        try:
-            with open(cache_file) as f:
-                cached = json.load(f)
-            print(f"   ✅ Using cached oracle")
-            return cached
-        except json.JSONDecodeError:
-            print(f"   ⚠️  Ignoring corrupted oracle cache, recomputing...")
-            cache_file.unlink(missing_ok=True)
+        with open(cache_file) as f:
+            cached = json.load(f)
+        print(f"   ✅ Using cached oracle")
+        return cached
     
     print(f"   🔮 Running oracle...")
     
     try:
-        if solver_library == "firedrake":
-            from pdebench.oracle.firedrake_oracle import FiredrakeOracleSolver
-
-            oracle = FiredrakeOracleSolver()
-        else:
-            from pdebench.oracle import OracleSolver
-
-            oracle = OracleSolver()
+        from pdebench.oracle import OracleSolver
+        
+        oracle = OracleSolver()
         oracle_config = case['oracle_config']
         
-        # Firedrake 和 DOLFINx 的 oracle 入口签名不同，按库分别调用。
-        if solver_library == "firedrake":
-            result = oracle.solve(oracle_config)
-        else:
-            result = oracle.solve(oracle_config, solver_library=solver_library)
+        # 调用统一 Oracle 求解器（支持多库，可选 Docker）
+        result = oracle.solve(
+            oracle_config,
+            solver_library=solver_library,
+            use_docker=use_docker,
+            docker_image=docker_image,
+        )
         
         # 构建缓存数据
         cached = {
             'error': result.baseline_error,
             'time': result.baseline_time,
             'case_id': case_id,
-            'num_dofs': _normalize_num_dofs(result.num_dofs),
+            'num_dofs': result.num_dofs,
             'solver_info': result.solver_info,
             # 存储参考解（用于误差计算）
             'reference': result.reference.tolist(),
         }
         
-        # 保存缓存（原子写，避免中途失败留下半截 JSON）
+        # 保存缓存
         cache_dir.mkdir(parents=True, exist_ok=True)
-        tmp_cache_file = cache_file.with_suffix(cache_file.suffix + ".tmp")
-        with open(tmp_cache_file, 'w') as f:
+        with open(cache_file, 'w') as f:
             json.dump(cached, f, indent=2)
-        tmp_cache_file.replace(cache_file)
         
         print(f"   ✅ Oracle: error={result.baseline_error:.2e}, time={result.baseline_time:.3f}s")
         return cached
@@ -203,25 +193,56 @@ def run_oracle(case: Dict, cache_dir: Path, solver_library: str = "dolfinx") -> 
 # 执行与评测
 # =============================================================================
 
-def execute_solver(solver_code: str, case: Dict, output_dir: Path, timeout: int = 300) -> Dict:
-    """执行solver并返回结果"""
-    from pdebench.sandbox.executor import execute_agent_function
-    
-    # 保存solver代码
-    solver_path = output_dir / "solver.py"
-    solver_path.write_text(solver_code)
-    
+def execute_solver(
+    solver_code: str,
+    case: Dict,
+    output_dir: Path,
+    timeout: int = 300,
+    solver_library: str = "dolfinx",
+    use_docker: bool = False,
+    docker_image: str = None,
+) -> Dict:
+    """执行 solver 并返回结果（支持 Python 和 C++ 两种 agent 代码）
+
+    use_docker:   为 True 时在 Docker 容器内编译/运行（deal.II/Firedrake 无需本机安装）
+    docker_image: 覆盖默认镜像名
+    """
     agent_output = output_dir / "agent_output"
     agent_output.mkdir(parents=True, exist_ok=True)
-    
-    # 执行
-    result = execute_agent_function(
-        script_path=solver_path,
-        outdir=agent_output,
-        case_spec=case,
-        timeout_sec=timeout
-    )
-    
+
+    # ── deal.II C++ 分支 ────────────────────────────────────────────────────
+    if solver_library == "dealii":
+        from pdebench.sandbox.cpp_executor import CppExecutor
+
+        solver_path = output_dir / "solver.cpp"
+        solver_path.write_text(solver_code)
+
+        _dealii_image = docker_image or "pdebench/dealii:latest"
+        result = CppExecutor(
+            docker_image=_dealii_image if use_docker else None
+        ).execute(
+            solver_cpp  = solver_code,
+            case_spec   = case,
+            outdir      = agent_output,
+            timeout_sec = timeout,
+        )
+    else:
+        # ── Python 分支（dolfinx / firedrake）───────────────────────────────
+        from pdebench.sandbox.executor import execute_agent_function
+
+        solver_path = output_dir / "solver.py"
+        solver_path.write_text(solver_code)
+
+        _firedrake_image = docker_image or "pdebench/firedrake:latest"
+        result = execute_agent_function(
+            script_path  = solver_path,
+            outdir       = agent_output,
+            case_spec    = case,
+            timeout_sec  = timeout,
+            use_docker   = use_docker and solver_library == "firedrake",
+            docker_image = _firedrake_image,
+        )
+
     if not result.success:
         return {
             'success': False,
@@ -229,16 +250,16 @@ def execute_solver(solver_code: str, case: Dict, output_dir: Path, timeout: int 
             'time': result.t_agent_run,
             'stdout': result.stdout,
             'stderr': result.stderr,
-            'error_message': result.error_message
+            'error_message': result.error_message,
         }
-    
+
     return {
         'success': True,
         'error': None,  # 稍后计算
         'time': result.t_agent_run,
         'stdout': result.stdout,
         'stderr': result.stderr,
-        'agent_output': agent_output
+        'agent_output': agent_output,
     }
 
 
@@ -302,6 +323,8 @@ def run_single_case(
     timeout: int = 300,
     max_attempts: int = 1,
     solver_library: str = "dolfinx",
+    use_docker: bool = False,
+    docker_image: str = None,
 ) -> Dict:
     """运行单个case的完整流程"""
     
@@ -317,7 +340,12 @@ def run_single_case(
     print(f"{'='*60}")
     
     # Step 1: 获取oracle参考解
-    oracle_info = run_oracle(case, oracle_cache_dir, solver_library=solver_library)
+    oracle_info = run_oracle(
+        case, oracle_cache_dir,
+        solver_library=solver_library,
+        use_docker=use_docker,
+        docker_image=docker_image,
+    )
     _write_oracle_reference(case, oracle_info, oracle_output)
     
     # Step 2: 生成prompt
@@ -410,7 +438,12 @@ def run_single_case(
     
     # Step 4: 执行solver
     print(f"   🔧 Executing solver...")
-    exec_result = execute_solver(solver_code, case, case_output, timeout)
+    exec_result = execute_solver(
+        solver_code, case, case_output, timeout,
+        solver_library=solver_library,
+        use_docker=use_docker,
+        docker_image=docker_image,
+    )
     
     if not exec_result['success']:
         print(f"   ❌ Execution failed: {exec_result.get('error_message', 'Unknown')[:100]}")
@@ -795,6 +828,8 @@ def run_single_case_multi_attempt(
     timeout: int = 300,
     max_attempts: int = 3,
     solver_library: str = "dolfinx",
+    use_docker: bool = False,
+    docker_image: str = None,
 ) -> Dict:
     """
     运行单个case的多轮迭代流程（实验 2.1）
@@ -830,7 +865,12 @@ def run_single_case_multi_attempt(
     print(f"{'='*60}")
     
     # Step 1: 获取 oracle 参考解
-    oracle_info = run_oracle(case, oracle_cache_dir, solver_library=solver_library)
+    oracle_info = run_oracle(
+        case, oracle_cache_dir,
+        solver_library=solver_library,
+        use_docker=use_docker,
+        docker_image=docker_image,
+    )
     _write_oracle_reference(case, oracle_info, oracle_output)
     
     # Step 2: 生成初始 prompt
@@ -1008,11 +1048,17 @@ def run_single_case_multi_attempt(
         
         # Step 5: 执行 solver
         print(f"   🔧 Executing solver...")
-        
-        # 保存当前尝试的 solver 代码
-        (case_output / f"solver_attempt_{attempt_num}.py").write_text(solver_code)
-        
-        exec_result = execute_solver(solver_code, case, case_output, timeout)
+
+        # 保存当前尝试的 solver 代码（扩展名根据库类型而定）
+        ext = "cpp" if solver_library == "dealii" else "py"
+        (case_output / f"solver_attempt_{attempt_num}.{ext}").write_text(solver_code)
+
+        exec_result = execute_solver(
+            solver_code, case, case_output, timeout,
+            solver_library=solver_library,
+            use_docker=use_docker,
+            docker_image=docker_image,
+        )
         
         # Step 6: 评估结果
         if not exec_result['success']:
@@ -1304,6 +1350,8 @@ def run_benchmark(
     timeout: int = 300,
     max_attempts: int = 1,
     solver_library: str = "dolfinx",
+    use_docker: bool = False,
+    docker_image: str = None,
 ):
     """运行完整benchmark"""
     
@@ -1315,6 +1363,9 @@ def run_benchmark(
     print(f"🤖 Agents: {', '.join(agents)}")
     print(f"⏱️  Timeout: {timeout}s")
     print(f"📚 Solver Library: {solver_library}")
+    if use_docker:
+        _img = docker_image or f"pdebench/{solver_library}:latest"
+        print(f"🐳 Docker Mode: {_img}")
     if existing_solver_dir:
         print(f"📂 Batch Eval Mode: {existing_solver_dir}")
     print("="*80)
@@ -1398,6 +1449,8 @@ def run_benchmark(
                     timeout=timeout,
                     max_attempts=max_attempts,
                     solver_library=solver_library,
+                    use_docker=use_docker,
+                    docker_image=docker_image,
                 )
             else:
                 # 使用原始函数（单次尝试或预定义 solver）
@@ -1412,6 +1465,8 @@ def run_benchmark(
                     timeout=timeout,
                     max_attempts=max_attempts,
                     solver_library=solver_library,
+                    use_docker=use_docker,
+                    docker_image=docker_image,
                 )
             
             agent_results.append(result)
@@ -1845,14 +1900,35 @@ def main():
 
     parser.add_argument(
         '--solver-library',
-        choices=['dolfinx', 'firedrake'],
+        choices=['dolfinx', 'firedrake', 'dealii'],
         default='dolfinx',
         help=(
             'FEM library for oracle ground-truth and agent prompt (default: dolfinx). '
-            '"firedrake" requires Firedrake to be installed (https://www.firedrakeproject.org).'
+            '"firedrake" requires Firedrake (https://www.firedrakeproject.org). '
+            '"dealii" requires deal.II ≥ 9.3 and cmake; agent writes C++ code.'
         )
     )
-    
+
+    parser.add_argument(
+        '--docker',
+        action='store_true',
+        default=False,
+        help=(
+            '在 Docker 容器内运行 oracle 和 agent solver，宿主机无需安装 '
+            'deal.II 或 Firedrake。仅对 --solver-library dealii/firedrake 生效。'
+        )
+    )
+
+    parser.add_argument(
+        '--docker-image',
+        type=str,
+        default=None,
+        help=(
+            '覆盖默认 Docker 镜像名（默认：pdebench/dealii:latest 或 '
+            'pdebench/firedrake:latest）。'
+        )
+    )
+
     args = parser.parse_args()
     
     # 切换到项目根目录
@@ -1891,10 +1967,12 @@ def main():
         equation_types=args.equation_types,
         solver_path=args.solver_path,
         skip_generation=args.skip_generation,
-        existing_solver_dir=existing_solver_dir,  # 传递批量评估目录
+        existing_solver_dir=existing_solver_dir,
         timeout=args.timeout,
         max_attempts=args.max_attempts,
         solver_library=args.solver_library,
+        use_docker=args.docker,
+        docker_image=args.docker_image,
     )
 
 
