@@ -21,7 +21,6 @@ pdebench/core/feedback_prompt.py
 pdebench/core/llm_client.py
 pdebench/core/multi_attempt.py
 pdebench/core/prompt_builder.py
-pdebench/core/template_prompt_builder.py
 pdebench/datasets/__init__.py
 pdebench/datasets/schema.py
 pdebench/evaluation/__init__.py
@@ -48,10 +47,12 @@ pdebench/metrics/specialized/parabolic.py
 pdebench/metrics/specialized/reaction_diffusion.py
 pdebench/metrics/specialized/stochastic.py
 pdebench/oracle/__init__.py
+pdebench/oracle/_types.py
 pdebench/oracle/biharmonic.py
 pdebench/oracle/common.py
 pdebench/oracle/convection_diffusion.py
 pdebench/oracle/darcy.py
+pdebench/oracle/docker_bridge.py
 pdebench/oracle/heat.py
 pdebench/oracle/helmholtz.py
 pdebench/oracle/linear_elasticity.py
@@ -59,7 +60,11 @@ pdebench/oracle/navier_stokes.py
 pdebench/oracle/oracle.py
 pdebench/oracle/poisson.py
 pdebench/oracle/reaction_diffusion.py
+pdebench/oracle/runner.py
 pdebench/oracle/stokes.py
+pdebench/oracle/dealii_oracle/__init__.py
+pdebench/oracle/dealii_oracle/common.py
+pdebench/oracle/dealii_oracle/oracle.py
 pdebench/oracle/firedrake_oracle/__init__.py
 pdebench/oracle/firedrake_oracle/biharmonic.py
 pdebench/oracle/firedrake_oracle/common.py
@@ -73,6 +78,7 @@ pdebench/oracle/firedrake_oracle/poisson.py
 pdebench/oracle/firedrake_oracle/reaction_diffusion.py
 pdebench/oracle/firedrake_oracle/stokes.py
 pdebench/sandbox/__init__.py
+pdebench/sandbox/cpp_executor.py
 pdebench/sandbox/executor.py
 pdebench/templates/__init__.py
 pdebench/templates/prompts.py

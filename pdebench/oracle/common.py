@@ -83,7 +83,8 @@ def create_mesh(domain_spec: Dict[str, Any], mesh_spec: Dict[str, Any]) -> mesh.
         geom.characteristic_length_max = char_length
         mesh_data = geom.generate_mesh()
         cell_key = "triangle" if dim == 2 else "tetra"
-        out_mesh = meshio.Mesh(points=mesh_data.points, cells={cell_key: mesh_data.cells_dict[cell_key]})
+        points = mesh_data.points[:, :2] if dim == 2 else mesh_data.points
+        out_mesh = meshio.Mesh(points=points, cells={cell_key: mesh_data.cells_dict[cell_key]})
         fname = f"tmp_mesh_{MPI.COMM_WORLD.rank}_{os.getpid()}"
         meshio.write(f"{fname}.xdmf", out_mesh)
         with XDMFFile(MPI.COMM_WORLD, f"{fname}.xdmf", "r") as xdmf:
