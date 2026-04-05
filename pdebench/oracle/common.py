@@ -35,19 +35,10 @@ def create_mesh(domain_spec: Dict[str, Any], mesh_spec: Dict[str, Any]) -> mesh.
         """将 pygmsh 对象转为 dolfinx 网格，包含 KeyError 保护。"""
         geom.characteristic_length_max = char_length
         mesh_data = geom.generate_mesh()
-        
-        cell_key = "triangle" if dim == 2 else "tetra"
-        if cell_key not in mesh_data.cells_dict:
-            # 如果没生成三角形，可能是几何定义冲突（重叠或坐标越界）
-            available = list(mesh_data.cells_dict.keys())
-            raise RuntimeError(f"Gmsh failed to generate 2D cells for {domain_type}. Found: {available}")
 
-        out_mesh = meshio.Mesh(
-            points=mesh_data.points,
-            cells={cell_key: mesh_data.cells_dict[cell_key]}
-        )
-        
-        # 并行安全的文件名
+        cell_key = "triangle" if dim == 2 else "tetra"
+        pts = mesh_data.points[:, :dim] if dim < mesh_data.points.shape[1] else mesh_data.points
+        out_mesh = meshio.Mesh(points=pts, cells={cell_key: mesh_data.cells_dict[cell_key]})
         fname = f"tmp_mesh_{MPI.COMM_WORLD.rank}_{os.getpid()}"
         meshio.write(f"{fname}.xdmf", out_mesh)
         
@@ -65,6 +56,8 @@ def create_mesh(domain_spec: Dict[str, Any], mesh_spec: Dict[str, Any]) -> mesh.
 
     # 复杂几何 (OpenCASCADE 内核)
     with pygmsh.occ.Geometry() as geom:
+        import gmsh
+        gmsh.option.setNumber("General.Verbosity", 0)
         geom.characteristic_length_max = char_length
 
         if domain_type == "l_shape":
