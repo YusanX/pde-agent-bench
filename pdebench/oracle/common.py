@@ -161,47 +161,6 @@ def create_mesh(domain_spec: Dict[str, Any], mesh_spec: Dict[str, Any]) -> mesh.
 
 # --- 采样与并行聚合逻辑 ---
 
-def _eval_on_grid(msh: mesh.Mesh, eval_fn, bbox: List[float], nx: int, ny: int):
-    from dolfinx import geometry
-    x_grid = np.linspace(bbox[0], bbox[1], nx)
-    y_grid = np.linspace(bbox[2], bbox[3], ny)
-    xx, yy = np.meshgrid(x_grid, y_grid, indexing="xy")
-    points = np.zeros((ny * nx, 3))
-    points[:, 0], points[:, 1] = xx.ravel(), yy.ravel()
-
-    bb_tree = geometry.bb_tree(msh, msh.topology.dim)
-    cell_candidates = geometry.compute_collisions_points(bb_tree, points)
-    colliding_cells = geometry.compute_colliding_cells(msh, cell_candidates, points)
-
-    local_values = np.zeros(points.shape[0], dtype=PETSc.ScalarType)
-    mask = np.zeros(points.shape[0], dtype=bool)
-
-    points_on_proc, cells_on_proc, eval_map = [], [], []
-    for i in range(points.shape[0]):
-        if len(colliding_cells.links(i)) > 0:
-            points_on_proc.append(points[i])
-            cells_on_proc.append(colliding_cells.links(i)[0])
-            eval_map.append(i)
-            mask[i] = True
-
-    if points_on_proc:
-        values_eval = eval_fn(np.array(points_on_proc), np.array(cells_on_proc))
-        local_values[eval_map] = values_eval.flatten()
-
-    # MPI 并行聚合
-    total_values = np.zeros_like(local_values)
-    msh.comm.Reduce(local_values, total_values, op=MPI.SUM, root=0)
-    
-    # 标志位聚合（判断哪些点是有网格覆盖的）
-    global_mask = msh.comm.reduce(mask, op=MPI.LOR, root=0)
-
-    if msh.comm.rank == 0:
-        # 将网格外的点设为 NaN 以便在测试脚本中统计比例
-        total_values[~global_mask] = np.nan
-        return x_grid, y_grid, total_values.reshape(ny, nx)
-    else:
-        return x_grid, y_grid, np.zeros((ny, nx))
-
 def create_scalar_space(msh: mesh.Mesh, family: str, degree: int) -> fem.FunctionSpace:
     return fem.functionspace(msh, (family, degree))
 
@@ -288,19 +247,29 @@ def parse_vector_expression(
     return ufl.as_vector([parse_expression(expr, x, t=t) for expr in expr_list])
 
 
+# 修改 common.py 中的这个函数
 def interpolate_expression(func: fem.Function, expr: ufl.core.expr.Expr) -> None:
     msh = func.function_space.mesh
     try:
+        # 尝试标准插值
         points = func.function_space.element.interpolation_points
         expr_compiled = fem.Expression(expr, points, comm=msh.comm)
         func.interpolate(expr_compiled)
     except Exception:
-        # 兜底：如果表达式太简单（纯常数），直接赋值
+        # 兜底方案：处理常数或简单的 UFL 表达式
         try:
-            val = float(ufl.assemble(expr * ufl.dx(msh)) / ufl.assemble(1.0 * ufl.dx(msh)))
+            # 检查是否为纯数字常数
+            val = float(expr)
             func.x.array[:] = val
-        except:
-            func.x.array[:] = 0.0
+        except Exception:
+            # 如果是 UFL 表达式但插值失败，尝试通过积分计算平均值
+            dx_m = ufl.Measure("dx", domain=msh)
+            try:
+                num = fem.assemble_scalar(fem.form(expr * dx_m))
+                den = fem.assemble_scalar(fem.form(1.0 * dx_m))
+                func.x.array[:] = float(num / den)
+            except:
+                func.x.array[:] = 0.0
 
 def create_kappa_field(
     msh: mesh.Mesh, kappa_spec: Dict[str, Any]
@@ -321,57 +290,60 @@ def create_kappa_field(
     raise ValueError(f"Unknown kappa type: {kappa_spec['type']}")
 
 
+# 修改前：
+# L2_e_squared = fem.assemble_scalar(fem.form(ufl.inner(e, e) * ufl.dx))
+# 修改后：
 def compute_L2_error(u_h: fem.Function, u_exact: fem.Function) -> float:
+    msh = u_h.function_space.mesh
+    dx_m = ufl.Measure("dx", domain=msh) # 显式绑定网格
     e = u_h - u_exact
-    L2_e_squared = fem.assemble_scalar(fem.form(ufl.inner(e, e) * ufl.dx))
+    # 使用绑定了 domain 的 dx
+    L2_e_squared = fem.assemble_scalar(fem.form(ufl.inner(e, e) * dx_m))
     L2_exact_squared = fem.assemble_scalar(
-        fem.form(ufl.inner(u_exact, u_exact) * ufl.dx)
+        fem.form(ufl.inner(u_exact, u_exact) * dx_m)
     )
     if L2_exact_squared < 1e-15:
         return float(math.sqrt(L2_e_squared))
     return float(math.sqrt(L2_e_squared) / math.sqrt(L2_exact_squared))
 
-
-def _eval_on_grid(
-    msh: mesh.Mesh,
-    eval_fn,
-    bbox: List[float],
-    nx: int,
-    ny: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _eval_on_grid(msh: mesh.Mesh, eval_fn, bbox: List[float], nx: int, ny: int):
     from dolfinx import geometry
-
-    xmin, xmax, ymin, ymax = bbox
-    x_grid = np.linspace(xmin, xmax, nx)
-    y_grid = np.linspace(ymin, ymax, ny)
-    # indexing="xy": xx[i,j]=x_grid[j], yy[i,j]=y_grid[i]
-    # result[i,j] = f(x_grid[j], y_grid[i])  →  row=y, col=x  (standard image convention)
-    # Models sample with the same "xy" convention, so oracle and agent grids are aligned.
+    x_grid = np.linspace(bbox[0], bbox[1], nx)
+    y_grid = np.linspace(bbox[2], bbox[3], ny)
     xx, yy = np.meshgrid(x_grid, y_grid, indexing="xy")
-
     points = np.zeros((ny * nx, 3))
-    points[:, 0] = xx.ravel()
-    points[:, 1] = yy.ravel()
+    points[:, 0], points[:, 1] = xx.ravel(), yy.ravel()
 
     bb_tree = geometry.bb_tree(msh, msh.topology.dim)
     cell_candidates = geometry.compute_collisions_points(bb_tree, points)
     colliding_cells = geometry.compute_colliding_cells(msh, cell_candidates, points)
 
-    values = np.full(points.shape[0], np.nan)
+    local_values = np.zeros(points.shape[0], dtype=PETSc.ScalarType)
+    # 使用 NaN 初始化以便后续判断
+    local_values[:] = np.nan 
+
     points_on_proc, cells_on_proc, eval_map = [], [], []
-    for i, point in enumerate(points):
+    for i in range(points.shape[0]):
         if len(colliding_cells.links(i)) > 0:
-            points_on_proc.append(point)
+            points_on_proc.append(points[i])
             cells_on_proc.append(colliding_cells.links(i)[0])
             eval_map.append(i)
 
     if points_on_proc:
         values_eval = eval_fn(np.array(points_on_proc), np.array(cells_on_proc))
-        values[eval_map] = values_eval
+        local_values[eval_map] = values_eval.flatten()
 
-    return x_grid, y_grid, values.reshape(ny, nx)
+    # 并行聚合：收集所有进程的数据
+    total_values = np.zeros_like(local_values)
+    # 用 MPI_MAX 因为有值的点是非 nan，没值的点是 nan (处理 NaN 需要谨慎，这里简化逻辑)
+    # 更稳妥的做法是先用 0，最后再处理
+    local_values_zero = np.nan_to_num(local_values, nan=0.0)
+    msh.comm.Reduce(local_values_zero, total_values, op=MPI.SUM, root=0)
 
-
+    if msh.comm.rank == 0:
+        return x_grid, y_grid, total_values.reshape(ny, nx)
+    else:
+        return x_grid, y_grid, None
 def sample_scalar_on_grid(
     u_fem: fem.Function, bbox: List[float], nx: int, ny: int
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:

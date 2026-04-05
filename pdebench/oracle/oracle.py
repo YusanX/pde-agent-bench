@@ -20,6 +20,7 @@ from .poisson import PoissonSolver
 from .stokes import StokesSolver
 from .darcy import DarcySolver
 from .reaction_diffusion import ReactionDiffusionSolver
+from .burger import BurgersSolver
 
 
 class OracleSolver:
@@ -87,5 +88,9 @@ class OracleSolver:
             return DarcySolver().solve(case_spec)
         if pde_type == "reaction_diffusion":
             return ReactionDiffusionSolver().solve(case_spec)
+            # ...existing code...
+        if pde_type == "burgers":
+            return BurgersSolver().solve(case_spec)
+    # ...existing code...
 
         raise ValueError(f"Unsupported PDE type: {pde_type}")
