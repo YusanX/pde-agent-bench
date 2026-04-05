@@ -252,6 +252,8 @@ class StokesSolver:
             "pc_type": solver_params.get("pc_type", "hypre"),
             "ksp_rtol": solver_params.get("rtol", 1e-10),
         }
+        if "pc_factor_mat_solver_type" in solver_params:
+            petsc_options["pc_factor_mat_solver_type"] = solver_params["pc_factor_mat_solver_type"]
 
         problem = LinearProblem(
             a, L, bcs=bcs, petsc_options=petsc_options, petsc_options_prefix="oracle_stokes_"
@@ -345,6 +347,10 @@ class StokesSolver:
                 "pc_type": ref_solver.get("pc_type", petsc_options["pc_type"]),
                 "ksp_rtol": ref_solver.get("rtol", 1e-12),
             }
+            if ref_solver.get("pc_factor_mat_solver_type") or petsc_options.get("pc_factor_mat_solver_type"):
+                ref_petsc_options["pc_factor_mat_solver_type"] = ref_solver.get(
+                    "pc_factor_mat_solver_type", petsc_options.get("pc_factor_mat_solver_type", "mumps")
+                )
             ref_problem = LinearProblem(
                 ref_a,
                 ref_L,
