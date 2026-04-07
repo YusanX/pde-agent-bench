@@ -142,6 +142,15 @@ def create_mesh(domain_spec: Dict[str, Any], mesh_spec: Dict[str, Any]) -> mesh.
             bar = geom.add_rectangle([c1[0], 0.5-w/2, 0], c2[0]-c1[0], w)
             geom.boolean_union([d1, d2, bar])
         
+        elif domain_type == "eccentric_annulus":
+            outer = params.get("outer_circle", {"c": [0, 0], "r": 1.0})
+            inner = params.get("inner_circle", {"c": [0.2, 0], "r": 0.4})
+            oc, o_r = outer["c"], outer["r"]
+            ic, i_r = inner["c"], inner["r"]
+            d1 = geom.add_disk([oc[0], oc[1], 0], o_r)
+            d2 = geom.add_disk([ic[0], ic[1], 0], i_r)
+            geom.boolean_difference(d1, d2)
+
         elif domain_type == "periodic_square":
             # 几何上是一个矩形，周期性配对逻辑由 Solver 在创建 FunctionSpace 时调用 create_periodic_map 处理
             out = params.get("extents", [0.0, 1.0, 0.0, 1.0]) # [xmin, xmax, ymin, ymax]
