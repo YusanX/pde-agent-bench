@@ -10,11 +10,14 @@
  * Output:   velocity magnitude ‖u‖.
  */
 
+#include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <filesystem>
 #include <iostream>
 #include <map>
 #include <string>
+#include <vector>
 
 #include <deal.II/base/function_parser.h>
 #include <deal.II/base/quadrature_lib.h>
@@ -34,6 +37,9 @@
 #include <deal.II/lac/block_vector.h>
 #include <deal.II/lac/dynamic_sparsity_pattern.h>
 #include <deal.II/lac/full_matrix.h>
+#include <deal.II/lac/precondition.h>
+#include <deal.II/lac/solver_gmres.h>
+#include <deal.II/lac/solver_minres.h>
 #include <deal.II/lac/sparse_direct.h>
 #include <deal.II/lac/vector.h>
 #include <deal.II/numerics/vector_tools.h>
@@ -43,6 +49,65 @@
 
 using namespace dealii;
 namespace { static const std::map<std::string, double> MU_CONST = {{"pi", M_PI}}; }
+
+namespace {
+
+std::string json_to_expr(const nlohmann::json &value)
+{
+  if (value.is_string())
+    return value.get<std::string>();
+  if (value.is_number())
+    return std::to_string(value.get<double>());
+  return "0.0";
+}
+
+std::pair<std::string, std::string> json_to_vector_exprs(const nlohmann::json &value)
+{
+  if (value.is_array() && value.size() >= 2)
+    return {json_to_expr(value[0]), json_to_expr(value[1])};
+
+  const std::string scalar = json_to_expr(value);
+  return {scalar, scalar};
+}
+
+std::vector<nlohmann::json> normalize_dirichlet_cfg(const nlohmann::json &bc)
+{
+  if (bc.is_null() || !bc.contains("dirichlet"))
+    return {};
+
+  const auto &dirichlet = bc["dirichlet"];
+  if (dirichlet.is_array())
+  {
+    std::vector<nlohmann::json> out;
+    for (const auto &cfg : dirichlet)
+      out.push_back(cfg);
+    return out;
+  }
+  if (dirichlet.is_object())
+    return {dirichlet};
+  return {};
+}
+
+std::vector<types::boundary_id> boundary_ids_for_selector(const std::string &on)
+{
+  std::string key = on;
+  std::transform(key.begin(), key.end(), key.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (key == "all" || key == "*")
+    return {0, 1, 2, 3};
+  if (key == "x0" || key == "xmin")
+    return {0};
+  if (key == "x1" || key == "xmax")
+    return {1};
+  if (key == "y0" || key == "ymin")
+    return {2};
+  if (key == "y1" || key == "ymax")
+    return {3};
+
+  throw std::runtime_error("Unknown stokes boundary selector: " + on);
+}
+
+}  // namespace
 
 // Vector BC for velocity (2 components)
 class VelocityBC : public Function<2> {
@@ -103,6 +168,23 @@ class StokesOracle {
 
   void make_mesh() {
     GridGenerator::subdivided_hyper_cube(tria_, spec_.mesh.resolution, 0.0, 1.0);
+    for (const auto &cell : tria_.active_cell_iterators()) {
+      for (unsigned int face_no = 0; face_no < GeometryInfo<2>::faces_per_cell; ++face_no) {
+        const auto face = cell->face(face_no);
+        if (!face->at_boundary())
+          continue;
+
+        const auto c = face->center();
+        if (std::abs(c[0] - 0.0) < 1e-12)
+          face->set_boundary_id(0);
+        else if (std::abs(c[0] - 1.0) < 1e-12)
+          face->set_boundary_id(1);
+        else if (std::abs(c[1] - 0.0) < 1e-12)
+          face->set_boundary_id(2);
+        else if (std::abs(c[1] - 1.0) < 1e-12)
+          face->set_boundary_id(3);
+      }
+    }
   }
 
   void setup_system() {
@@ -111,15 +193,43 @@ class StokesOracle {
     DoFRenumbering::component_wise(dh_);
 
     cons_.clear();
-    const std::string bc_x = spec_.pde.value("_computed_bc_x", "0.0");
-    const std::string bc_y = spec_.pde.value("_computed_bc_y", "0.0");
-    VelocityBC bc_func(bc_x, bc_y);
-
-    // Apply BC only to velocity components (0 and 1)
     ComponentMask vel_mask(3, false);
     vel_mask.set(0, true);
     vel_mask.set(1, true);
-    VectorTools::interpolate_boundary_values(dh_, 0, bc_func, cons_, vel_mask);
+
+    if (spec_.has_exact()) {
+      const std::string bc_x = spec_.pde.value("_computed_bc_x", "0.0");
+      const std::string bc_y = spec_.pde.value("_computed_bc_y", "0.0");
+      VelocityBC bc_func(bc_x, bc_y);
+      for (const auto boundary_id : boundary_ids_for_selector("all")) {
+        VectorTools::interpolate_boundary_values(dh_, boundary_id, bc_func, cons_, vel_mask);
+      }
+    } else {
+      for (const auto &cfg : normalize_dirichlet_cfg(spec_.bc)) {
+        const std::string on = cfg.value("on", "all");
+        const nlohmann::json value =
+            cfg.contains("value") ? cfg["value"] : nlohmann::json(std::vector<std::string>{"0.0", "0.0"});
+        const auto [bc_x, bc_y] = json_to_vector_exprs(value);
+        VelocityBC bc_func(bc_x, bc_y);
+        for (const auto boundary_id : boundary_ids_for_selector(on)) {
+          VectorTools::interpolate_boundary_values(dh_, boundary_id, bc_func, cons_, vel_mask);
+        }
+      }
+    }
+
+    const std::string pressure_fixing = spec_.oracle_solver.pressure_fixing;
+    if (pressure_fixing == "point") {
+      const ComponentMask pressure_mask = fe_.component_mask(FEValuesExtractors::Scalar(2));
+      const IndexSet pressure_dofs = DoFTools::extract_dofs(dh_, pressure_mask);
+      for (auto it = pressure_dofs.begin(); it != pressure_dofs.end(); ++it) {
+        cons_.add_line(*it);
+        cons_.set_inhomogeneity(*it, 0.0);
+        break;
+      }
+    } else if (pressure_fixing != "none") {
+      throw std::runtime_error("Unsupported stokes pressure_fixing: " + pressure_fixing);
+    }
+
     cons_.close();
 
     DynamicSparsityPattern dsp(dh_.n_dofs());
@@ -169,7 +279,9 @@ class StokesOracle {
             auto p_j   = fev[pres].value(j, q);
 
             // ν (ε(u):ε(v)) - p ∇·v - q ∇·u
-            Ke(i,j) += (2.0 * nu_ * double_contract<0,0,1,1>(eps_i, eps_j)
+            // scalar_product computes the full double contraction A:B for SymmetricTensor
+            // (replaces double_contract<0,0,1,1> removed in deal.II 9.6+)
+            Ke(i,j) += (2.0 * nu_ * scalar_product(eps_i, eps_j)
                        - q_i * div_j
                        - p_j * div_i) * JxW;
           }
@@ -182,9 +294,43 @@ class StokesOracle {
   }
 
   void solve() {
-    SparseDirectUMFPACK direct;
-    direct.factorize(K_);
-    direct.vmult(solution_, rhs_);
+    const std::string ksp = spec_.oracle_solver.ksp_type;
+    const std::string pc  = spec_.oracle_solver.pc_type;
+
+    if (ksp == "preonly" || pc == "lu" || pc == "mumps") {
+      SparseDirectUMFPACK direct;
+      direct.factorize(K_);
+      direct.vmult(solution_, rhs_);
+      cons_.distribute(solution_);
+      return;
+    }
+
+    ReductionControl ctrl(spec_.oracle_solver.max_it,
+                          spec_.oracle_solver.atol,
+                          spec_.oracle_solver.rtol);
+
+    // For the full Stokes saddle-point matrix, SSOR on the whole system is not
+    // a valid generic preconditioner and can immediately produce NaN residuals.
+    // Use unpreconditioned Krylov by default unless a simple diagonal scaling is
+    // explicitly requested.
+    if (ksp == "minres") {
+      PreconditionIdentity prec;
+      SolverMinRes<Vector<double>> minres(ctrl);
+      minres.solve(K_, solution_, rhs_, prec);
+    } else if (pc == "none" || pc == "hypre" || pc == "ilu") {
+      PreconditionIdentity prec;
+      SolverGMRES<Vector<double>> gmres(ctrl);
+      gmres.solve(K_, solution_, rhs_, prec);
+    } else if (pc == "jacobi") {
+      PreconditionJacobi<SparseMatrix<double>> prec;
+      prec.initialize(K_, 1.0);
+      SolverGMRES<Vector<double>> gmres(ctrl);
+      gmres.solve(K_, solution_, rhs_, prec);
+    } else {
+      PreconditionIdentity prec;
+      SolverGMRES<Vector<double>> gmres(ctrl);
+      gmres.solve(K_, solution_, rhs_, prec);
+    }
     cons_.distribute(solution_);
   }
 };

@@ -20,6 +20,19 @@ from pathlib import Path
 import numpy as np
 
 
+def _to_jsonable(value):
+    """Convert numpy scalars/containers to plain Python JSON-safe values."""
+    if isinstance(value, dict):
+        return {str(k): _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
 def main() -> None:
     if len(sys.argv) != 4:
         print(
@@ -53,7 +66,7 @@ def main() -> None:
         "solver_info":    result.solver_info,
         "num_dofs":       result.num_dofs,
     }
-    (output_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+    (output_dir / "meta.json").write_text(json.dumps(_to_jsonable(meta), indent=2))
 
 
 if __name__ == "__main__":

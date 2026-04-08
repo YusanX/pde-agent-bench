@@ -4,19 +4,23 @@
  * Steady:    β·∇u - ε Δu = f   in Ω = [0,1]²,  u = g on ∂Ω
  * Transient: ∂u/∂t + β·∇u - ε Δu = f   (backward Euler time stepping)
  *
- * Stabilisation: SUPG (Streamline Upwind Petrov-Galerkin) is applied when
- * the local Péclet number Pe_loc > 1.
+ * Stabilisation: SUPG (Streamline Upwind Petrov-Galerkin) applied when
+ * oracle_solver.stabilization == "supg" (or pde_params.stabilization == "supg").
+ * The full residual-based SUPG bilinear form is used:
+ *   a_SUPG(u,v) += τ (β·∇v)(β·∇u - ε Δu)
  *
- * Solver: GMRES + SSOR (matrix is non-symmetric due to advection term).
+ * Solver: GMRES + ILU (for pc_type="ilu") or SSOR (default) or AMG (hypre).
  */
 
 #include <cmath>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <string>
 
 #include <deal.II/base/function_parser.h>
+#include <deal.II/base/mpi.h>
 #include <deal.II/base/quadrature_lib.h>
 #include <deal.II/base/timer.h>
 #include <deal.II/dofs/dof_handler.h>
@@ -28,8 +32,14 @@
 #include <deal.II/lac/affine_constraints.h>
 #include <deal.II/lac/dynamic_sparsity_pattern.h>
 #include <deal.II/lac/full_matrix.h>
+#include <deal.II/lac/petsc_precondition.h>
+#include <deal.II/lac/petsc_solver.h>
+#include <deal.II/lac/petsc_sparse_matrix.h>
+#include <deal.II/lac/petsc_vector.h>
 #include <deal.II/lac/precondition.h>
 #include <deal.II/lac/solver_gmres.h>
+#include <deal.II/lac/sparse_direct.h>
+#include <deal.II/lac/sparse_ilu.h>
 #include <deal.II/lac/sparse_matrix.h>
 #include <deal.II/lac/sparsity_pattern.h>
 #include <deal.II/lac/vector.h>
@@ -48,6 +58,14 @@ class ConvectionDiffusionOracle {
     epsilon_ = std::stod(spec_.pde.value("_computed_epsilon", "0.01"));
     beta_x_  = std::stod(spec_.pde.value("_computed_beta_x",  "1.0"));
     beta_y_  = std::stod(spec_.pde.value("_computed_beta_y",  "0.0"));
+
+    // Stabilization: oracle_solver overrides pde_params
+    stabilization_ = spec_.oracle_solver.stabilization;
+    if (stabilization_ == "none" && spec_.pde_params.contains("stabilization"))
+      stabilization_ = spec_.pde_params.value("stabilization", "none");
+
+    upwind_parameter_ = spec_.oracle_solver.upwind_parameter;
+
     if (!spec_.time_cfg.is_null()) {
       t0_    = spec_.time_cfg.value("t0",    0.0);
       t_end_ = spec_.time_cfg.value("t_end", 1.0);
@@ -82,9 +100,11 @@ class ConvectionDiffusionOracle {
   SparseMatrix<double>       sys_;  // M + dt*K
   Vector<double>             u_, old_u_, rhs_;
 
-  double epsilon_ = 0.01, beta_x_ = 1.0, beta_y_ = 0.0;
-  double t0_ = 0.0, t_end_ = 1.0, dt_ = 0.01;
-  bool   transient_ = false;
+  double      epsilon_ = 0.01, beta_x_ = 1.0, beta_y_ = 0.0;
+  double      t0_ = 0.0, t_end_ = 1.0, dt_ = 0.01;
+  std::string stabilization_    = "none";
+  double      upwind_parameter_ = 1.0;
+  bool        transient_        = false;
 
   void make_mesh() {
     GridGenerator::subdivided_hyper_cube(tria_, spec_.mesh.resolution, 0.0, 1.0);
@@ -94,7 +114,12 @@ class ConvectionDiffusionOracle {
     dh_.distribute_dofs(fe_);
     cons_.clear();
     FunctionParser<2> bc(1);
-    bc.initialize("x,y", spec_.computed_bc(), MU_CONST, false);
+    if (transient_) {
+      bc.initialize("x,y,t", spec_.computed_bc(), MU_CONST, true);
+      bc.set_time(t0_);
+    } else {
+      bc.initialize("x,y", spec_.computed_bc(), MU_CONST, false);
+    }
     VectorTools::interpolate_boundary_values(dh_, 0, bc, cons_);
     cons_.close();
 
@@ -108,13 +133,13 @@ class ConvectionDiffusionOracle {
     rhs_.reinit(dh_.n_dofs());
   }
 
-  // Cell-level SUPG stabilisation parameter
+  // SUPG stabilisation parameter τ = α * h / (2|β|)
+  // Matches dolfinx formula: tau = upwind_parameter * h / (2 * beta_norm)
   double supg_tau(double h_cell) const {
+    if (stabilization_ != "supg") return 0.0;
     const double beta_norm = std::sqrt(beta_x_*beta_x_ + beta_y_*beta_y_);
     if (beta_norm < 1e-14) return 0.0;
-    const double Pe_loc = beta_norm * h_cell / (2.0 * epsilon_);
-    if (Pe_loc <= 1.0) return 0.0;
-    return h_cell / (2.0 * beta_norm) * (1.0 - 1.0 / Pe_loc);
+    return upwind_parameter_ * h_cell / (2.0 * beta_norm);
   }
 
   void assemble_KM(double t = 0.0) {
@@ -129,20 +154,22 @@ class ConvectionDiffusionOracle {
       src.initialize("x,y",   spec_.computed_source(), MU_CONST, false);
     if (has_t) src.set_time(t);
 
-    // h_cell approximation: diameter of reference cell
+    // h_cell: diameter of the square reference cell (side = 1/resolution)
     const double dx = 1.0 / spec_.mesh.resolution;
+    const double tau = supg_tau(dx * std::sqrt(2.0));
 
+    // update_hessians needed for the full SUPG residual term (−ε τ (β·∇v) Δu)
+    // For Q1 elements the Laplacian of shape functions is zero, so it is a
+    // no-op for degree=1.  For Q2+ elements it provides the consistency term.
     QGauss<2>   quad(fe_.degree + 1);
     FEValues<2> fev(fe_, quad,
-                    update_values | update_gradients |
+                    update_values | update_gradients | update_hessians |
                     update_JxW_values | update_quadrature_points);
 
     const unsigned int n = fe_.n_dofs_per_cell();
     FullMatrix<double> Ke(n, n), Me(n, n);
     Vector<double>     Fe(n);
     std::vector<types::global_dof_index> ids(n);
-
-    const double tau = supg_tau(dx * std::sqrt(2.0));  // cell diameter approx.
 
     for (auto& cell : dh_.active_cell_iterators()) {
       fev.reinit(cell); Ke = 0; Me = 0; Fe = 0;
@@ -158,9 +185,15 @@ class ConvectionDiffusionOracle {
           for (unsigned int j = 0; j < n; ++j) {
             const double conv_j = beta_x_ * fev.shape_grad(j,q)[0]
                                 + beta_y_ * fev.shape_grad(j,q)[1];
+            // Laplacian of shape function j (zero for Q1, nonzero for Q2+)
+            const double lap_j  = fev.shape_hessian(j,q)[0][0]
+                                + fev.shape_hessian(j,q)[1][1];
+
+            // Full residual-based SUPG bilinear form:
+            //   ε(∇u,∇v) + (β·∇u)v + τ(β·∇v)(β·∇u − ε Δu)
             Ke(i,j) += (epsilon_ * fev.shape_grad(i,q) * fev.shape_grad(j,q)
                        + fev.shape_value(i,q) * conv_j
-                       + supg_i * conv_j  // SUPG term
+                       + supg_i * (conv_j - epsilon_ * lap_j)
                        ) * JxW;
             if (transient_)
               Me(i,j) += vi * fev.shape_value(j,q) * JxW;
@@ -178,13 +211,84 @@ class ConvectionDiffusionOracle {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Helper: GMRES + BoomerAMG via PETSc wrappers.
+  // Used when oracle_solver.pc_type == "hypre".
+  // ---------------------------------------------------------------------------
+  void solve_petsc_amg(SparseMatrix<double>& mat, Vector<double>& sol,
+                       const Vector<double>& rhs_vec) {
+    const unsigned int n = dh_.n_dofs();
+
+    PETScWrappers::SparseMatrix K_petsc(sp_);
+    for (unsigned int row = 0; row < n; ++row)
+      for (auto it = mat.begin(row); it != mat.end(row); ++it)
+        K_petsc.set(row, it->column(), it->value());
+    K_petsc.compress(VectorOperation::insert);
+
+    PETScWrappers::MPI::Vector rhs_petsc(MPI_COMM_SELF, rhs_vec, n);
+    PETScWrappers::MPI::Vector sol_petsc(MPI_COMM_SELF, n, n);
+
+    const double rhs_norm = rhs_petsc.l2_norm();
+    const double tol = std::max(spec_.oracle_solver.atol,
+                                spec_.oracle_solver.rtol * rhs_norm);
+    SolverControl ctrl(spec_.oracle_solver.max_it, tol);
+
+    PETScWrappers::SolverGMRES gmres(ctrl);
+    PETScWrappers::PreconditionBoomerAMG amg;
+    PETScWrappers::PreconditionBoomerAMG::AdditionalData data;
+    data.symmetric_operator = false;
+    amg.initialize(K_petsc, data);
+    gmres.solve(K_petsc, sol_petsc, rhs_petsc, amg);
+
+    for (unsigned int i = 0; i < n; ++i)
+      sol(i) = sol_petsc(i);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Unified linear solver dispatcher.
+  // pc_type == "hypre"/"boomeramg"/"amg" → PETSc BoomerAMG
+  // pc_type == "ilu"/"ilu0"/"icc"        → SparseILU  (matches dolfinx/PETSc)
+  // anything else                         → SSOR
+  // ---------------------------------------------------------------------------
+  void solve_linear(SparseMatrix<double>& mat, Vector<double>& sol,
+                    const Vector<double>& rhs_vec) {
+    const std::string ksp = spec_.oracle_solver.ksp_type;
+    const std::string pc  = spec_.oracle_solver.pc_type;
+
+    // Direct solver (UMFPACK): pc_type="lu"/"direct" or ksp_type="preonly"
+    if (pc == "lu" || pc == "direct" || pc == "mumps" ||
+        ksp == "preonly") {
+      SparseDirectUMFPACK direct;
+      direct.initialize(mat);
+      direct.vmult(sol, rhs_vec);
+      return;
+    }
+
+    if (pc == "hypre" || pc == "boomeramg" || pc == "amg") {
+      solve_petsc_amg(mat, sol, rhs_vec);
+      return;
+    }
+
+    ReductionControl ctrl(spec_.oracle_solver.max_it,
+                          spec_.oracle_solver.atol,
+                          spec_.oracle_solver.rtol);
+    SolverGMRES<Vector<double>> gmres(ctrl);
+
+    if (pc == "ilu" || pc == "ilu0" || pc == "icc") {
+      SparseILU<double> prec;
+      prec.initialize(mat);
+      gmres.solve(mat, sol, rhs_vec, prec);
+    } else {
+      // Default: SSOR (for symmetric/nearly-symmetric problems)
+      PreconditionSSOR<SparseMatrix<double>> prec;
+      prec.initialize(mat, 1.2);
+      gmres.solve(mat, sol, rhs_vec, prec);
+    }
+  }
+
   void solve_steady() {
     assemble_KM();
-    ReductionControl ctrl(50000, spec_.oracle_solver.atol, spec_.oracle_solver.rtol);
-    PreconditionSSOR<SparseMatrix<double>> prec;
-    prec.initialize(K_, 1.2);
-    SolverGMRES<Vector<double>> gmres(ctrl);
-    gmres.solve(K_, u_, rhs_, prec);
+    solve_linear(K_, u_, rhs_);
     cons_.distribute(u_);
   }
 
@@ -202,7 +306,11 @@ class ConvectionDiffusionOracle {
       t += dt;
 
       rhs_ = 0;
-      assemble_KM(t);   // rebuilds K_ and M_, adds source to rhs_
+      assemble_KM(t);   // rebuilds K_ and M_, adds source F^n to rhs_
+
+      // Backward Euler: (M + dt*K) u^n = dt*F^n + M*u^{n-1}
+      // Scale source contribution by dt before adding M*u_old
+      rhs_ *= dt;
 
       // sys = M + dt*K
       sys_.copy_from(M_);
@@ -223,11 +331,7 @@ class ConvectionDiffusionOracle {
       cons_t.condense(sys_);
       cons_t.condense(rhs_);
 
-      ReductionControl ctrl(50000, spec_.oracle_solver.atol, spec_.oracle_solver.rtol);
-      PreconditionSSOR<SparseMatrix<double>> prec;
-      prec.initialize(sys_, 1.2);
-      SolverGMRES<Vector<double>> gmres(ctrl);
-      gmres.solve(sys_, u_, rhs_, prec);
+      solve_linear(sys_, u_, rhs_);
       cons_t.distribute(u_);
       old_u_ = u_;
     }
@@ -239,6 +343,7 @@ int main(int argc, char* argv[]) {
     std::cerr << "Usage: convection_diffusion_solver <case_spec.json> <outdir>\n";
     return 1;
   }
+  Utilities::MPI::MPI_InitFinalize mpi_init(argc, argv, 1);
   try { ConvectionDiffusionOracle(read_case_spec(argv[1])).run(argv[2]); }
   catch (const std::exception& e) { std::cerr << "ERROR: " << e.what() << "\n"; return 1; }
   return 0;

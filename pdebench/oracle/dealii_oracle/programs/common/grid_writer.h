@@ -143,15 +143,18 @@ void write_vector_magnitude_grid(const dealii::DoFHandler<dim>&  dof_handler,
 
   dealii::Functions::FEFieldFunction<dim> field_func(dof_handler, solution);
 
-  // value_list for vector functions returns a single double per component
-  // For vector fields we use vector_value_list
-  std::vector<dealii::Vector<double>> vec_values(n_pts, dealii::Vector<double>(dim));
+  // FEFieldFunction::vector_value_list requires vectors sized to the full number
+  // of FE components (e.g. 3 for NS/Stokes: ux, uy, p).  Using dim=2 instead
+  // causes out-of-bounds writes in Release mode (assertions disabled), silently
+  // corrupting the output and producing NaN magnitudes.
+  const unsigned int n_comps = dof_handler.get_fe().n_components();
+  std::vector<dealii::Vector<double>> vec_values(n_pts, dealii::Vector<double>(n_comps));
   field_func.vector_value_list(pts, vec_values);
 
   std::vector<double> magnitudes(n_pts);
   for (std::size_t k = 0; k < n_pts; ++k) {
     double mag2 = 0.0;
-    for (int d = 0; d < dim; ++d)
+    for (int d = 0; d < dim; ++d)   // only the first dim components are velocity
       mag2 += vec_values[k][d] * vec_values[k][d];
     magnitudes[k] = std::sqrt(mag2);
   }

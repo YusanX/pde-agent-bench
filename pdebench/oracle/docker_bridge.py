@@ -46,7 +46,7 @@ def solve_via_docker(
     case_spec:    Dict[str, Any],
     library:      str,
     docker_image: Optional[str] = None,
-    timeout_sec:  int = 600,
+    timeout_sec:  int = 1800,
 ) -> OracleResult:
     """
     在 Docker 容器内运行 oracle 求解器。
@@ -145,7 +145,7 @@ def _build_docker_cmd(
         "-v", f"{_PROJECT_ROOT}:{_PROJECT_ROOT}",
         "-e", f"PYTHONPATH={_PROJECT_ROOT}",
         image,
-        "python", "-m", "pdebench.oracle.runner",
+        "python3", "-m", "pdebench.oracle.runner",
         str(case_json),
         str(out_dir),
         library,
@@ -177,5 +177,12 @@ def _read_oracle_result(out_dir: Path) -> OracleResult:
         baseline_time  = float(meta["baseline_time"]),
         reference      = reference,
         solver_info    = meta["solver_info"],
-        num_dofs       = int(meta["num_dofs"]),
+        num_dofs       = _normalize_num_dofs(meta["num_dofs"]),
     )
+
+
+def _normalize_num_dofs(value: Any) -> int:
+    """Convert scalar/tuple/list numpy-style dof counts to a plain total integer."""
+    if isinstance(value, (list, tuple)):
+        return int(sum(_normalize_num_dofs(v) for v in value))
+    return int(value)

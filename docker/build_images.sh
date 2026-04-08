@@ -47,12 +47,29 @@ for target in "${TARGETS[@]}"; do
   IMAGE="${REPO}/${target}:${TAG}"
   DOCKERFILE="docker/Dockerfile.${target}"
 
+  # 自动透传系统代理（国内网络拉取 Docker Hub 镜像时需要）
+  PROXY_ARGS=()
+  for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy; do
+    if [[ -n "${!var:-}" ]]; then
+      PROXY_ARGS+=(--build-arg "${var}=${!var}")
+    fi
+  done
+
   echo ""
   echo ">>> Building $IMAGE from $DOCKERFILE ..."
-  docker build \
-    --file "$DOCKERFILE" \
-    --tag  "$IMAGE" \
-    .
+  [[ ${#PROXY_ARGS[@]} -gt 0 ]] && echo "    (proxy: ${HTTP_PROXY:-${http_proxy:-}})"
+  if [[ ${#PROXY_ARGS[@]} -gt 0 ]]; then
+    docker build \
+      --file "$DOCKERFILE" \
+      --tag  "$IMAGE" \
+      "${PROXY_ARGS[@]}" \
+      .
+  else
+    docker build \
+      --file "$DOCKERFILE" \
+      --tag  "$IMAGE" \
+      .
+  fi
   echo ">>> Built $IMAGE successfully."
 
   if [ "$PUSH" = true ]; then

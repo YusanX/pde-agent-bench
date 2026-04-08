@@ -10,11 +10,14 @@
  * Output:   velocity / displacement magnitude  ‖u‖ = √(u₁²+u₂²).
  */
 
+#include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <filesystem>
 #include <iostream>
 #include <map>
 #include <string>
+#include <vector>
 
 #include <deal.II/base/function_parser.h>
 #include <deal.II/base/quadrature_lib.h>
@@ -43,6 +46,65 @@
 
 using namespace dealii;
 namespace { static const std::map<std::string, double> MU_CONST = {{"pi", M_PI}}; }
+
+namespace {
+
+std::string json_to_expr(const nlohmann::json &value)
+{
+  if (value.is_string())
+    return value.get<std::string>();
+  if (value.is_number())
+    return std::to_string(value.get<double>());
+  return "0.0";
+}
+
+std::pair<std::string, std::string> json_to_vector_exprs(const nlohmann::json &value)
+{
+  if (value.is_array() && value.size() >= 2)
+    return {json_to_expr(value[0]), json_to_expr(value[1])};
+
+  const std::string scalar = json_to_expr(value);
+  return {scalar, scalar};
+}
+
+std::vector<nlohmann::json> normalize_dirichlet_cfg(const nlohmann::json &bc)
+{
+  if (bc.is_null() || !bc.contains("dirichlet"))
+    return {};
+
+  const auto &dirichlet = bc["dirichlet"];
+  if (dirichlet.is_array())
+  {
+    std::vector<nlohmann::json> out;
+    for (const auto &cfg : dirichlet)
+      out.push_back(cfg);
+    return out;
+  }
+  if (dirichlet.is_object())
+    return {dirichlet};
+  return {};
+}
+
+std::vector<types::boundary_id> boundary_ids_for_selector(const std::string &on)
+{
+  std::string key = on;
+  std::transform(key.begin(), key.end(), key.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (key == "all" || key == "*")
+    return {0, 1, 2, 3};
+  if (key == "x0" || key == "xmin")
+    return {0};
+  if (key == "x1" || key == "xmax")
+    return {1};
+  if (key == "y0" || key == "ymin")
+    return {2};
+  if (key == "y1" || key == "ymax")
+    return {3};
+
+  throw std::runtime_error("Unknown linear_elasticity boundary selector: " + on);
+}
+
+}  // namespace
 
 // Vector BC function: components (ux, uy) provided as two separate expressions
 class VectorBCFunc : public Function<2> {
@@ -100,18 +162,50 @@ class LinearElasticityOracle {
 
   void make_mesh() {
     GridGenerator::subdivided_hyper_cube(tria_, spec_.mesh.resolution, 0.0, 1.0);
+    for (const auto &cell : tria_.active_cell_iterators()) {
+      for (unsigned int face_no = 0; face_no < GeometryInfo<2>::faces_per_cell; ++face_no) {
+        const auto face = cell->face(face_no);
+        if (!face->at_boundary())
+          continue;
+
+        const auto c = face->center();
+        if (std::abs(c[0] - 0.0) < 1e-12)
+          face->set_boundary_id(0);
+        else if (std::abs(c[0] - 1.0) < 1e-12)
+          face->set_boundary_id(1);
+        else if (std::abs(c[1] - 0.0) < 1e-12)
+          face->set_boundary_id(2);
+        else if (std::abs(c[1] - 1.0) < 1e-12)
+          face->set_boundary_id(3);
+      }
+    }
   }
 
   void setup_system() {
     dh_.distribute_dofs(fe_);
     cons_.clear();
 
-    const std::string bc_x = spec_.pde.value("_computed_bc_x", "0.0");
-    const std::string bc_y = spec_.pde.value("_computed_bc_y", "0.0");
-    VectorBCFunc bc_func(bc_x, bc_y);
-    VectorTools::interpolate_boundary_values(
-        dh_, 0, bc_func, cons_,
-        ComponentMask());   // apply to all components
+    if (spec_.has_exact()) {
+      const std::string bc_x = spec_.pde.value("_computed_bc_x", "0.0");
+      const std::string bc_y = spec_.pde.value("_computed_bc_y", "0.0");
+      VectorBCFunc bc_func(bc_x, bc_y);
+      for (const auto boundary_id : boundary_ids_for_selector("all")) {
+        VectorTools::interpolate_boundary_values(
+            dh_, boundary_id, bc_func, cons_, ComponentMask());
+      }
+    } else {
+      for (const auto &cfg : normalize_dirichlet_cfg(spec_.bc)) {
+        const std::string on = cfg.value("on", "all");
+        const nlohmann::json value =
+            cfg.contains("value") ? cfg["value"] : nlohmann::json(std::vector<std::string>{"0.0", "0.0"});
+        const auto [bc_x, bc_y] = json_to_vector_exprs(value);
+        VectorBCFunc bc_func(bc_x, bc_y);
+        for (const auto boundary_id : boundary_ids_for_selector(on)) {
+          VectorTools::interpolate_boundary_values(
+              dh_, boundary_id, bc_func, cons_, ComponentMask());
+        }
+      }
+    }
     cons_.close();
 
     DynamicSparsityPattern dsp(dh_.n_dofs());
@@ -161,7 +255,7 @@ class LinearElasticityOracle {
             // σ(u_j) : ε(v_i)
             double trace_j = eps_j[0][0] + eps_j[1][1];
             double sigma_eps = lam_ * trace_j * (eps_i[0][0] + eps_i[1][1])
-                             + 2.0 * mu_ * double_contract<0,0,1,1>(eps_i, eps_j);
+                             + 2.0 * mu_ * scalar_product(eps_i, eps_j);
             Ke(i, j) += sigma_eps * JxW;
           }
           Fe(i) += vi * f_vec * JxW;

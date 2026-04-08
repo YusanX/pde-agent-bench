@@ -1909,26 +1909,6 @@ def main():
         )
     )
 
-    parser.add_argument(
-        '--docker',
-        action='store_true',
-        default=False,
-        help=(
-            '在 Docker 容器内运行 oracle 和 agent solver，宿主机无需安装 '
-            'deal.II 或 Firedrake。仅对 --solver-library dealii/firedrake 生效。'
-        )
-    )
-
-    parser.add_argument(
-        '--docker-image',
-        type=str,
-        default=None,
-        help=(
-            '覆盖默认 Docker 镜像名（默认：pdebench/dealii:latest 或 '
-            'pdebench/firedrake:latest）。'
-        )
-    )
-
     args = parser.parse_args()
     
     # 切换到项目根目录
@@ -1959,6 +1939,9 @@ def main():
             inferred_agent = existing_solver_dir.name
             print(f"   Inferred agent name: {inferred_agent}")
     
+    # dealii 和 firedrake 默认在 Docker 内运行，无需本机安装
+    use_docker = args.solver_library in ('dealii', 'firedrake')
+
     run_benchmark(
         agents=args.agent,
         output_dir=output_dir,
@@ -1971,8 +1954,8 @@ def main():
         timeout=args.timeout,
         max_attempts=args.max_attempts,
         solver_library=args.solver_library,
-        use_docker=args.docker,
-        docker_image=args.docker_image,
+        use_docker=use_docker,
+        docker_image=None,
     )
 
 

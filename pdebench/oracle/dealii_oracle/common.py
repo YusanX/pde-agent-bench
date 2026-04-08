@@ -291,8 +291,15 @@ def _preprocess_linear_elasticity(pde: dict, bc: dict) -> None:
     sx, sy = sp.symbols("x y", real=True)
 
     params = pde.get("pde_params", {})
-    lam = float(params.get("lambda", 1.0))
-    mu  = float(params.get("mu",     1.0))
+    if "lambda" in params and "mu" in params:
+        lam = float(params["lambda"])
+        mu  = float(params["mu"])
+    else:
+        E = float(params.get("E", 1.0))
+        nu = float(params.get("nu", 0.3))
+        # Plane strain Lamé parameters, matching the Python oracle.
+        mu = E / (2.0 * (1.0 + nu))
+        lam = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))
     pde["_computed_lambda"] = str(lam)
     pde["_computed_mu"]     = str(mu)
 
@@ -324,8 +331,16 @@ def _preprocess_linear_elasticity(pde: dict, bc: dict) -> None:
         pde["_computed_bc_y"]     = _sympy_to_muparser(uy_sym)
         pde["_has_exact"]         = True
     else:
-        pde["_computed_source_x"] = "0.0"
-        pde["_computed_source_y"] = "0.0"
+        src = pde.get("source_term", ["0.0", "0.0"])
+        if isinstance(src, (list, tuple)) and len(src) >= 2:
+            pde["_computed_source_x"] = _expr_to_mu(src[0])
+            pde["_computed_source_y"] = _expr_to_mu(src[1])
+        else:
+            pde["_computed_source_x"] = "0.0"
+            pde["_computed_source_y"] = "0.0"
+
+        # For no-exact cases, C++ reads the raw bc.dirichlet JSON directly to
+        # support boundary subsets such as x0/x1/y0/y1 and lists of constraints.
         pde["_computed_bc_x"]     = "0.0"
         pde["_computed_bc_y"]     = "0.0"
         pde["_has_exact"]         = False
@@ -333,29 +348,49 @@ def _preprocess_linear_elasticity(pde: dict, bc: dict) -> None:
 
 def _preprocess_reaction_diffusion(pde: dict, bc: dict) -> None:
     """
-    -Δu + σ u = f   (reaction-diffusion / Helmholtz with σ≥0)
+    Steady:    -Δu + σ u = f
+    Transient: ∂u/∂t - Δu + σ u = f
     """
     import sympy as sp
-    sx, sy = sp.symbols("x y", real=True)
+    sx, sy, st = sp.symbols("x y t", real=True)
 
     params = pde.get("pde_params", {})
     sigma = float(params.get("sigma", 1.0))
     pde["_computed_sigma"] = str(sigma)
 
+    is_transient = "time" in pde
+
     manufactured = pde.get("manufactured_solution", {})
     if "u" in manufactured:
         u_sym = _parse_sym(manufactured["u"])
         laplacian = sp.diff(u_sym, sx, 2) + sp.diff(u_sym, sy, 2)
-        f_sym = -laplacian + sigma * u_sym
-        pde["_computed_source"] = _sympy_to_muparser(sp.expand(f_sym))
-        pde["_computed_bc"]     = _sympy_to_muparser(u_sym)
-        pde["_has_exact"]       = True
+
+        if is_transient:
+            du_dt = sp.diff(u_sym, st)
+            f_sym = du_dt - laplacian + sigma * u_sym
+            pde["_computed_source"] = _sympy_to_muparser(sp.expand(f_sym))
+            pde["_computed_bc"]     = _sympy_to_muparser(u_sym)
+            ic_sym = u_sym.subs(st, sp.Integer(0))
+            pde["_computed_ic"]     = _sympy_to_muparser(sp.simplify(ic_sym))
+        else:
+            # Steady: if manufactured solution accidentally contains t, evaluate at t=0
+            if u_sym.has(st):
+                u_sym    = u_sym.subs(st, sp.Integer(0))
+                laplacian = sp.diff(u_sym, sx, 2) + sp.diff(u_sym, sy, 2)
+            f_sym = -laplacian + sigma * u_sym
+            pde["_computed_source"] = _sympy_to_muparser(sp.expand(f_sym))
+            pde["_computed_bc"]     = _sympy_to_muparser(u_sym)
+
+        pde["_has_exact"] = True
     else:
         src = pde.get("source_term", "0.0")
         pde["_computed_source"] = _expr_to_mu(src)
         bc_val = bc.get("value", "0.0")
         pde["_computed_bc"]     = "0.0" if bc_val == "u" else _expr_to_mu(bc_val)
-        pde["_has_exact"]       = False
+        if is_transient:
+            ic_str = pde.get("initial_condition", "0.0")
+            pde["_computed_ic"] = _expr_to_mu(ic_str)
+        pde["_has_exact"] = False
 
 
 def _preprocess_stokes(pde: dict, bc: dict) -> None:
@@ -391,8 +426,16 @@ def _preprocess_stokes(pde: dict, bc: dict) -> None:
         pde["_computed_p_exact"]  = _sympy_to_muparser(p_sym)
         pde["_has_exact"]         = True
     else:
-        pde["_computed_source_x"] = "0.0"
-        pde["_computed_source_y"] = "0.0"
+        src = pde.get("source_term", ["0.0", "0.0"])
+        if isinstance(src, (list, tuple)) and len(src) >= 2:
+            pde["_computed_source_x"] = _expr_to_mu(src[0])
+            pde["_computed_source_y"] = _expr_to_mu(src[1])
+        else:
+            pde["_computed_source_x"] = "0.0"
+            pde["_computed_source_y"] = "0.0"
+
+        # For no-exact cases, C++ reads the raw bc.dirichlet JSON directly to
+        # support boundary subsets such as x0/x1/y0/y1 and mixed inflow/outflow.
         pde["_computed_bc_x"]     = "0.0"
         pde["_computed_bc_y"]     = "0.0"
         pde["_has_exact"]         = False
@@ -401,14 +444,28 @@ def _preprocess_stokes(pde: dict, bc: dict) -> None:
 def _preprocess_navier_stokes(pde: dict, bc: dict) -> None:
     """
     (u·∇)u - ν Δu + ∇p = f,  ∇·u = 0  (steady incompressible NS).
-    Includes nonlinear convection term in manufactured source.
+
+    Generates:
+      _computed_source_x/y  – body force consistent with ν∇u:∇v weak form
+      _computed_bc_x/y      – velocity BC (manufactured or "0.0")
+      _bc_segments          – JSON list [{id, ex, ey}] for per-wall BCs
+                              Boundary ids: 0=x0,1=x1,2=y0,3=y1
     """
+    import json as _json
     import sympy as sp
     sx, sy = sp.symbols("x y", real=True)
 
     params = pde.get("pde_params", {})
     nu = float(params.get("nu", params.get("viscosity", 0.01)))
     pde["_computed_nu"] = str(nu)
+
+    # Map boundary name → boundary id (matches make_mesh() tagging)
+    WALL_IDS = {
+        "x0": 0, "xmin": 0,
+        "x1": 1, "xmax": 1,
+        "y0": 2, "ymin": 2,
+        "y1": 3, "ymax": 3,
+    }
 
     manufactured = pde.get("manufactured_solution", {})
     if "u" in manufactured and "p" in manufactured and isinstance(manufactured["u"], list):
@@ -421,7 +478,7 @@ def _preprocess_navier_stokes(pde: dict, bc: dict) -> None:
         dp_dx  = sp.diff(p_sym, sx)
         dp_dy  = sp.diff(p_sym, sy)
 
-        # Convection: (u·∇)u
+        # Convection (u·∇)u; source consistent with -νΔu (= ν∇u:∇v weak form)
         conv_x = ux_sym * sp.diff(ux_sym, sx) + uy_sym * sp.diff(ux_sym, sy)
         conv_y = ux_sym * sp.diff(uy_sym, sx) + uy_sym * sp.diff(uy_sym, sy)
 
@@ -434,12 +491,46 @@ def _preprocess_navier_stokes(pde: dict, bc: dict) -> None:
         pde["_computed_bc_y"]     = _sympy_to_muparser(uy_sym)
         pde["_computed_p_exact"]  = _sympy_to_muparser(p_sym)
         pde["_has_exact"]         = True
+
+        # Manufactured: apply exact solution on all four walls
+        ex_str = pde["_computed_bc_x"]
+        ey_str = pde["_computed_bc_y"]
+        segments = [{"id": bid, "ex": ex_str, "ey": ey_str} for bid in [0, 1, 2, 3]]
+
     else:
-        pde["_computed_source_x"] = "0.0"
-        pde["_computed_source_y"] = "0.0"
-        pde["_computed_bc_x"]     = "0.0"
-        pde["_computed_bc_y"]     = "0.0"
-        pde["_has_exact"]         = False
+        # No-exact: forward source_term from case spec
+        src = pde.get("source_term")
+        if isinstance(src, list) and len(src) >= 2:
+            pde["_computed_source_x"] = _expr_to_mu(str(src[0]))
+            pde["_computed_source_y"] = _expr_to_mu(str(src[1]))
+        else:
+            pde["_computed_source_x"] = "0.0"
+            pde["_computed_source_y"] = "0.0"
+        pde["_computed_bc_x"] = "0.0"
+        pde["_computed_bc_y"] = "0.0"
+        pde["_has_exact"]     = False
+
+        # Build per-wall BC segments from bc.dirichlet list
+        dirichlet = bc if isinstance(bc, list) else ([bc] if isinstance(bc, dict) else [])
+        segments: list = []
+        for seg in dirichlet:
+            on  = seg.get("on", "all").lower()
+            val = seg.get("value", ["0.0", "0.0"])
+            if isinstance(val, list) and len(val) >= 2:
+                vx, vy = _expr_to_mu(str(val[0])), _expr_to_mu(str(val[1]))
+            else:
+                vx = vy = _expr_to_mu(str(val))
+            if on in ("all", "*"):
+                for bid in [0, 1, 2, 3]:
+                    segments.append({"id": bid, "ex": vx, "ey": vy})
+            elif on in WALL_IDS:
+                segments.append({"id": WALL_IDS[on], "ex": vx, "ey": vy})
+        # If no BCs specified, default to zero on all walls
+        if not segments:
+            for bid in [0, 1, 2, 3]:
+                segments.append({"id": bid, "ex": "0.0", "ey": "0.0"})
+
+    pde["_bc_segments"] = _json.dumps(segments)
 
 
 # ============================================================================
@@ -570,7 +661,7 @@ def run_oracle_program(
     pde_type:    str,
     case_spec:   Dict[str, Any],
     build_dir:   Path,
-    timeout_sec: int = 300,
+    timeout_sec: int = 900,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """
     Write case_spec to a temp JSON, invoke the compiled C++ binary,

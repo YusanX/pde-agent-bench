@@ -35,11 +35,17 @@
 #include <deal.II/fe/fe_values.h>
 #include <deal.II/grid/grid_generator.h>
 #include <deal.II/grid/tria.h>
+#include <deal.II/base/mpi.h>
 #include <deal.II/lac/affine_constraints.h>
 #include <deal.II/lac/dynamic_sparsity_pattern.h>
 #include <deal.II/lac/full_matrix.h>
+#include <deal.II/lac/petsc_precondition.h>
+#include <deal.II/lac/petsc_solver.h>
+#include <deal.II/lac/petsc_sparse_matrix.h>
+#include <deal.II/lac/petsc_vector.h>
 #include <deal.II/lac/precondition.h>
 #include <deal.II/lac/solver_cg.h>
+#include <deal.II/lac/solver_control.h>
 #include <deal.II/lac/sparse_direct.h>
 #include <deal.II/lac/sparse_matrix.h>
 #include <deal.II/lac/sparsity_pattern.h>
@@ -181,18 +187,20 @@ class BiharmonicOracle {
 
           for (unsigned int i = 0; i < n_dofs; ++i) {
             for (unsigned int j = 0; j < n_dofs; ++j) {
-              // ∂φ/∂n  (normal derivative)
-              double dn_i = fiv.average_of_shape_gradients(i, q) * n_vec;
-              double dn_j = fiv.average_of_shape_gradients(j, q) * n_vec;
+              // ∂φ/∂n  (normal derivative jump)
               double jmp_dn_i = fiv.jump_in_shape_gradients(i, q) * n_vec;
               double jmp_dn_j = fiv.jump_in_shape_gradients(j, q) * n_vec;
 
               // Penalty + consistency + symmetry terms
+              // scalar_product performs the full double contraction H:N for Tensor<2,2>
+              // (deal.II 9.6+ removed the implicit double-contraction via operator*)
+              const auto nn = outer_product(n_vec, n_vec);
+              const double Hnn_i = scalar_product(fiv.average_of_shape_hessians(i,q), nn);
+              const double Hnn_j = scalar_product(fiv.average_of_shape_hessians(j,q), nn);
               Kface(i,j) +=
                   (gam * jmp_dn_i * jmp_dn_j
-                   // Hessian-normal average * normal-grad jump
-                   - fiv.average_of_shape_hessians(i,q) * outer_product(n_vec,n_vec) * jmp_dn_j
-                   - jmp_dn_i * fiv.average_of_shape_hessians(j,q) * outer_product(n_vec,n_vec)
+                   - Hnn_i * jmp_dn_j
+                   - jmp_dn_i * Hnn_j
                   ) * JxW;
             }
           }
@@ -206,10 +214,61 @@ class BiharmonicOracle {
   }
 
   void solve() {
-    // Use direct solver: C0-IP matrix structure is more complex
+    const std::string ksp = spec_.oracle_solver.ksp_type;
+    const std::string pc  = spec_.oracle_solver.pc_type;
+
+    // For SPD biharmonic C0-IP matrices, use PETSc CG + BoomerAMG (Hypre) when
+    // requested. BoomerAMG is far more efficient than UMFPACK for large systems
+    // (condition number scales as h^{-4}, so AMG's O(N) complexity wins).
+    if ((ksp == "cg" || ksp == "minres") &&
+        (pc == "hypre" || pc == "boomeramg" || pc == "amg")) {
+      solve_petsc_amg();
+      return;
+    }
+
+    // Default: UMFPACK direct solver (reliable for small/medium systems)
     SparseDirectUMFPACK direct;
     direct.factorize(K_);
     direct.vmult(u_, rhs_);
+    cons_.distribute(u_);
+  }
+
+  void solve_petsc_amg() {
+    const unsigned int n = dh_.n_dofs();
+
+    // Copy assembled native SparseMatrix into a serial PETSc matrix.
+    // SparseMatrix(SparsityPatternType) is a templated constructor that accepts
+    // deal.II's SparsityPattern and allocates a SEQAIJ PETSc matrix.
+    PETScWrappers::SparseMatrix K_petsc(sp_);
+    for (unsigned int row = 0; row < n; ++row)
+      for (auto it = K_.begin(row); it != K_.end(row); ++it)
+        K_petsc.set(row, it->column(), it->value());
+    K_petsc.compress(VectorOperation::insert);
+
+    // Serial PETSc vectors via MPI::Vector with MPI_COMM_SELF.
+    // deal.II v9.7 only has PETScWrappers::MPI::Vector (no separate serial type).
+    // Template constructor copies directly from a dealii::Vector<double>.
+    PETScWrappers::MPI::Vector rhs_petsc(MPI_COMM_SELF, rhs_, n);
+    PETScWrappers::MPI::Vector sol_petsc(MPI_COMM_SELF, n, n);
+
+    // Solver control: honour atol and rtol from oracle_solver spec
+    const double rhs_norm = rhs_petsc.l2_norm();
+    const double tol = std::max(spec_.oracle_solver.atol,
+                                spec_.oracle_solver.rtol * rhs_norm);
+    SolverControl ctrl(spec_.oracle_solver.max_it, tol);
+
+    // CG + BoomerAMG (symmetric_operator = true → symmetric smoothers)
+    PETScWrappers::SolverCG cg(ctrl);
+    PETScWrappers::PreconditionBoomerAMG amg;
+    PETScWrappers::PreconditionBoomerAMG::AdditionalData data;
+    data.symmetric_operator = true;
+    amg.initialize(K_petsc, data);
+    cg.solve(K_petsc, sol_petsc, rhs_petsc, amg);
+
+    // Copy solution back to native vector for grid writing.
+    // operator()(i) uses VecGetValues internally – safe in serial mode.
+    for (unsigned int i = 0; i < n; ++i)
+      u_(i) = sol_petsc(i);
     cons_.distribute(u_);
   }
 };
@@ -219,6 +278,8 @@ int main(int argc, char* argv[]) {
     std::cerr << "Usage: biharmonic_solver <case_spec.json> <outdir>\n";
     return 1;
   }
+  // PETSc (and thus BoomerAMG) requires MPI to be initialized even in serial.
+  Utilities::MPI::MPI_InitFinalize mpi_init(argc, argv, 1);
   try { BiharmonicOracle(read_case_spec(argv[1])).run(argv[2]); }
   catch (const std::exception& e) { std::cerr << "ERROR: " << e.what() << "\n"; return 1; }
   return 0;

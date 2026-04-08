@@ -14,6 +14,7 @@ Workflow for each solve() call:
 from __future__ import annotations
 
 import copy
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Set, Tuple
 
@@ -26,7 +27,11 @@ from .common import ensure_built, preprocess_case_spec, run_oracle_program
 # Paths resolved relative to this file so the oracle works regardless of cwd
 _ORACLE_DIR   = Path(__file__).resolve().parent
 _PROGRAMS_DIR = _ORACLE_DIR / "programs"
-_BUILD_DIR    = _ORACLE_DIR / "build"
+
+# 优先使用预编译目录（Docker 镜像内由 ENV DEALII_ORACLE_PREBUILT_DIR 指定），
+# 回退到源码旁的 build/ 目录（本地开发环境）
+_PREBUILT_ENV = os.environ.get("DEALII_ORACLE_PREBUILT_DIR", "")
+_BUILD_DIR    = Path(_PREBUILT_ENV) if _PREBUILT_ENV else _ORACLE_DIR / "build"
 
 
 def _sample_exact_scalar_grid(
@@ -53,6 +58,50 @@ def _sample_exact_scalar_grid(
     if values.shape == ():
         values = np.full((ny, nx), float(values), dtype=np.float64)
     return values.reshape(ny, nx)
+
+
+def _sample_exact_vector_magnitude_grid(
+    expr_list: list,
+    grid_cfg: Dict[str, Any],
+    *,
+    t_value: Optional[float] = None,
+) -> np.ndarray:
+    """
+    Sample vector field components and return their L2 magnitude grid.
+    Matches write_vector_magnitude_grid in grid_writer.h (stokes/navier_stokes/linear_elasticity).
+    """
+    sx, sy, st = sp.symbols("x y t", real=True)
+    bbox = grid_cfg["bbox"]
+    nx = int(grid_cfg["nx"])
+    ny = int(grid_cfg["ny"])
+    x_lin = np.linspace(bbox[0], bbox[1], nx)
+    y_lin = np.linspace(bbox[2], bbox[3], ny)
+    xx, yy = np.meshgrid(x_lin, y_lin, indexing="xy")
+
+    mag_sq = np.zeros((ny, nx), dtype=np.float64)
+    for expr_str in expr_list:
+        expr = sp.sympify(str(expr_str), locals={"x": sx, "y": sy, "t": st, "pi": sp.pi})
+        if t_value is not None:
+            expr = expr.subs(st, float(t_value))
+        fn = sp.lambdify((sx, sy), expr, modules="numpy")
+        comp = np.asarray(fn(xx, yy), dtype=np.float64)
+        if comp.shape == ():
+            comp = np.full((ny, nx), float(comp), dtype=np.float64)
+        mag_sq += comp.reshape(ny, nx) ** 2
+
+    return np.sqrt(mag_sq)
+
+
+def _reference_time_value(pde_cfg: Dict[str, Any]) -> Optional[float]:
+    """Use terminal time when evaluating transient manufactured solutions."""
+    time_cfg = pde_cfg.get("time", {})
+    if not isinstance(time_cfg, dict):
+        return None
+    if "t_end" in time_cfg:
+        return float(time_cfg["t_end"])
+    if "t0" in time_cfg:
+        return float(time_cfg["t0"])
+    return None
 
 
 def _poisson_reference_grid(
@@ -142,6 +191,45 @@ def _heat_reference_grid(
     return ref_grid, ref_info
 
 
+def _biharmonic_reference_grid(
+    solver: "DealIIOracleSolver",
+    case_spec: Dict[str, Any],
+) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
+    """
+    Build a reference grid for Biharmonic:
+    - exact grid if manufactured_solution.u exists
+    - otherwise a higher-accuracy deal.II solve using reference_config
+    """
+    pde_cfg = case_spec["pde"]
+    manufactured = pde_cfg.get("manufactured_solution", {})
+    grid_cfg = case_spec["output"]["grid"]
+
+    if "u" in manufactured:
+        return _sample_exact_scalar_grid(manufactured["u"], grid_cfg), {}
+
+    ref_cfg = case_spec.get("reference_config", {})
+    if not ref_cfg:
+        return None, {}
+
+    ref_case = copy.deepcopy(case_spec)
+    ref_case["mesh"] = ref_cfg.get("mesh", case_spec["mesh"])
+    ref_case["fem"] = ref_cfg.get("fem", case_spec["fem"])
+    ref_case["oracle_solver"] = ref_cfg.get("oracle_solver", case_spec.get("oracle_solver", {}))
+
+    ref_enriched = preprocess_case_spec(ref_case)
+    solver._ensure_built("biharmonic")
+    ref_grid, _ = run_oracle_program(
+        pde_type="biharmonic",
+        case_spec=ref_enriched,
+        build_dir=_BUILD_DIR,
+        timeout_sec=solver._timeout,
+    )
+    return ref_grid, {
+        "reference_resolution": ref_case["mesh"].get("resolution"),
+        "reference_degree": ref_case["fem"].get("degree"),
+    }
+
+
 def _helmholtz_reference_grid(
     solver: "DealIIOracleSolver",
     case_spec: Dict[str, Any],
@@ -181,6 +269,143 @@ def _helmholtz_reference_grid(
     }
 
 
+def _scalar_pde_reference_grid(
+    solver: "DealIIOracleSolver",
+    case_spec: Dict[str, Any],
+    pde_type: str,
+) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
+    """
+    Generic reference grid builder for scalar PDEs (convection_diffusion, reaction_diffusion).
+    - exact grid if manufactured_solution.u is a scalar string
+    - otherwise a higher-accuracy solve using reference_config
+    """
+    pde_cfg = case_spec["pde"]
+    manufactured = pde_cfg.get("manufactured_solution", {})
+    grid_cfg = case_spec["output"]["grid"]
+    t_value = _reference_time_value(pde_cfg)
+
+    if "u" in manufactured and isinstance(manufactured["u"], str):
+        return _sample_exact_scalar_grid(manufactured["u"], grid_cfg, t_value=t_value), {}
+
+    ref_cfg = case_spec.get("reference_config", {})
+    if not ref_cfg:
+        return None, {}
+
+    ref_case = copy.deepcopy(case_spec)
+    ref_case["mesh"] = ref_cfg.get("mesh", case_spec["mesh"])
+    ref_case["fem"] = ref_cfg.get("fem", case_spec["fem"])
+    ref_oracle_solver = ref_cfg.get("oracle_solver", case_spec.get("oracle_solver", {}))
+
+    # deal.II quad mesh has ~2x more DoFs than a dolfinx triangle mesh at the
+    # same resolution (Q2 vs P2).  For large reference meshes, GMRES+ILU(0)
+    # can time out even though dolfinx's PETSc ILU succeeds easily.
+    # Override to UMFPACK direct solver when no direct solver is already
+    # requested — this matches the Stokes reference override strategy and
+    # ensures robustness regardless of problem conditioning.
+    ref_ksp = ref_oracle_solver.get("ksp_type", "gmres")
+    ref_pc  = ref_oracle_solver.get("pc_type",  "ilu")
+    if ref_ksp not in ("preonly",) and ref_pc not in ("lu", "mumps", "direct"):
+        ref_oracle_solver = {
+            **ref_oracle_solver,
+            "ksp_type": "preonly",
+            "pc_type":  "lu",
+        }
+
+    ref_case["oracle_solver"] = ref_oracle_solver
+
+    ref_enriched = preprocess_case_spec(ref_case)
+    solver._ensure_built(pde_type)
+    ref_grid, _ = run_oracle_program(
+        pde_type=pde_type,
+        case_spec=ref_enriched,
+        build_dir=_BUILD_DIR,
+        timeout_sec=solver._timeout,
+    )
+    return ref_grid, {
+        "reference_resolution": ref_case["mesh"].get("resolution"),
+        "reference_degree": ref_case["fem"].get("degree"),
+    }
+
+
+def _vector_magnitude_pde_reference_grid(
+    solver: "DealIIOracleSolver",
+    case_spec: Dict[str, Any],
+    pde_type: str,
+) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
+    """
+    Generic reference grid builder for vector PDEs (stokes, navier_stokes, linear_elasticity).
+    C++ binary outputs velocity/displacement magnitude via write_vector_magnitude_grid.
+    - exact magnitude grid if manufactured_solution.u is a list of expressions
+    - otherwise a higher-accuracy solve using reference_config
+    """
+    pde_cfg = case_spec["pde"]
+    manufactured = pde_cfg.get("manufactured_solution", {})
+    grid_cfg = case_spec["output"]["grid"]
+    t_value = _reference_time_value(pde_cfg)
+
+    if "u" in manufactured and isinstance(manufactured["u"], list):
+        return _sample_exact_vector_magnitude_grid(manufactured["u"], grid_cfg, t_value=t_value), {}
+
+    ref_cfg = case_spec.get("reference_config", {})
+    if not ref_cfg:
+        return None, {}
+
+    ref_case = copy.deepcopy(case_spec)
+    ref_case["mesh"] = ref_cfg.get("mesh", case_spec["mesh"])
+    ref_case["fem"] = ref_cfg.get("fem", case_spec["fem"])
+    ref_oracle_solver = ref_cfg.get("oracle_solver", case_spec.get("oracle_solver", {}))
+
+    # deal.II doesn't have PETSc/Hypre. For Stokes/NS reference solves that
+    # specify an AMG-type iterative solver (minres+hypre, gmres+hypre …),
+    # unpreconditioned Krylov diverges or times out on large meshes (200+).
+    # Override to UMFPACK direct solver on a manageable P2/P1 mesh (<=128)
+    # which is still substantially more accurate than the coarse solve.
+    if pde_type == "stokes":
+        ref_ksp = ref_oracle_solver.get("ksp_type", "")
+        ref_pc  = ref_oracle_solver.get("pc_type", "")
+        if ref_ksp not in ("preonly",) and ref_pc not in ("lu", "mumps"):
+            ref_res = min(ref_case["mesh"].get("resolution", 128), 128)
+            ref_case["mesh"] = {**ref_case["mesh"], "resolution": ref_res}
+            ref_case["fem"]  = {"degree_u": 2, "degree_p": 1}
+            ref_oracle_solver = {
+                "ksp_type": "preonly",
+                "pc_type": "lu",
+                "rtol": 1e-12,
+                "pressure_fixing": ref_oracle_solver.get("pressure_fixing", "point"),
+            }
+
+    if pde_type == "navier_stokes":
+        # deal.II NS always uses UMFPACK internally (Picard). The reference
+        # mesh can be very large (140-180) causing many slow factorizations.
+        # Cap at 96 to keep Picard reference solve within the timeout budget
+        # while still providing a substantially finer reference than the
+        # baseline (which is typically resolution 32-64).
+        ref_res = min(ref_case["mesh"].get("resolution", 96), 96)
+        ref_case["mesh"] = {**ref_case["mesh"], "resolution": ref_res,
+                             "cell_type": "quadrilateral"}
+        ref_case["fem"]  = {"degree_u": 2, "degree_p": 1}
+        ref_oracle_solver = {
+            **ref_oracle_solver,
+            "rtol": 1e-10,
+            "atol": 1e-12,
+        }
+
+    ref_case["oracle_solver"] = ref_oracle_solver
+
+    ref_enriched = preprocess_case_spec(ref_case)
+    solver._ensure_built(pde_type)
+    ref_grid, _ = run_oracle_program(
+        pde_type=pde_type,
+        case_spec=ref_enriched,
+        build_dir=_BUILD_DIR,
+        timeout_sec=solver._timeout,
+    )
+    return ref_grid, {
+        "reference_resolution": ref_case["mesh"].get("resolution"),
+        "reference_degree": ref_case["fem"].get("degree"),
+    }
+
+
 class DealIIOracleSolver:
     """
     Oracle backend that compiles deal.II C++ programs on first use and
@@ -191,7 +416,7 @@ class DealIIOracleSolver:
     OracleResult with the same field semantics.
     """
 
-    def __init__(self, timeout_sec: int = 300):
+    def __init__(self, timeout_sec: int = 900):
         self._timeout = timeout_sec
         self._built_pdes: Set[str] = set()
 
@@ -218,6 +443,24 @@ class DealIIOracleSolver:
 
         # 2. Compile oracle binaries if not yet done
         self._ensure_built(pde_type)
+
+        # 2b. For Stokes, deal.II doesn't have a working AMG preconditioner for
+        # the full saddle-point system. When the oracle_solver requests an
+        # iterative solver with hypre/ilu/none preconditioning, unpreconditioned
+        # Krylov diverges or gives inaccurate results on many problems.
+        # Override to UMFPACK (direct solver) so the baseline solve is reliable.
+        # The agent's submitted SOLUTION (not solver choice) is what gets graded.
+        if pde_type == "stokes":
+            os_cfg = enriched.get("oracle_solver", {})
+            _ksp = os_cfg.get("ksp_type", "preonly")
+            _pc  = os_cfg.get("pc_type", "lu")
+            if _ksp not in ("preonly",) and _pc not in ("lu", "mumps"):
+                enriched = copy.deepcopy(enriched)
+                enriched["oracle_solver"] = {
+                    **os_cfg,
+                    "ksp_type": "preonly",
+                    "pc_type":  "lu",
+                }
 
         # 3. Run C++ binary
         grid, meta = run_oracle_program(
@@ -251,6 +494,24 @@ class DealIIOracleSolver:
                 solver_info.update(ref_info)
         elif pde_type == "helmholtz":
             ref_grid, ref_info = _helmholtz_reference_grid(self, case_spec)
+            if ref_grid is not None:
+                baseline_error = compute_rel_L2_grid(grid, ref_grid)
+                reference = ref_grid
+                solver_info.update(ref_info)
+        elif pde_type == "biharmonic":
+            ref_grid, ref_info = _biharmonic_reference_grid(self, case_spec)
+            if ref_grid is not None:
+                baseline_error = compute_rel_L2_grid(grid, ref_grid)
+                reference = ref_grid
+                solver_info.update(ref_info)
+        elif pde_type in ("convection_diffusion", "reaction_diffusion"):
+            ref_grid, ref_info = _scalar_pde_reference_grid(self, case_spec, pde_type)
+            if ref_grid is not None:
+                baseline_error = compute_rel_L2_grid(grid, ref_grid)
+                reference = ref_grid
+                solver_info.update(ref_info)
+        elif pde_type in ("stokes", "navier_stokes", "linear_elasticity"):
+            ref_grid, ref_info = _vector_magnitude_pde_reference_grid(self, case_spec, pde_type)
             if ref_grid is not None:
                 baseline_error = compute_rel_L2_grid(grid, ref_grid)
                 reference = ref_grid

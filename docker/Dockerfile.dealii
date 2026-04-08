@@ -1,18 +1,40 @@
 # ============================================================================
 # pdebench/docker/Dockerfile.dealii
 #
-# 基础镜像：deal.II 官方镜像（Ubuntu 22.04 + deal.II 9.5）
+# 基础镜像：deal.II 官方镜像（Ubuntu 22.04 + deal.II 9.7）
 # 作用：提供 deal.II C++ 库环境，用于运行 deal.II oracle 和编译/执行 agent C++ solver
 #
-# 构建：
+# 构建（单平台，本机架构）：
 #   docker build -t pdebench/dealii:latest -f docker/Dockerfile.dealii .
+#
+# 构建（多架构，同时支持 amd64 + arm64，需要 buildx）：
+#   docker buildx build \
+#     --platform linux/amd64,linux/arm64 \
+#     -t pdebench/dealii:latest \
+#     -f docker/Dockerfile.dealii . --push
+#
+# ⚠️  注意：dealii/dealii:v9.7.1-jammy 官方镜像目前仅提供 linux/amd64。
+#     在 Apple Silicon Mac（arm64）上运行 amd64 镜像时：
+#       - Docker Desktop 会通过 Rosetta 2 转译，比 QEMU 快 3-10x
+#       - docker_bridge.py 已自动在 arm64 宿主机上加 --platform linux/amd64
+#     如需原生 arm64 速度，需基于 arm64 Ubuntu 22.04 手动编译 deal.II。
 #
 # 本镜像策略：
 #   - 不将项目代码烧入镜像，代码通过 volume 挂载（-v）在运行时注入
 #   - oracle C++ 二进制在 docker build 阶段预编译，节省运行时编译开销
 # ============================================================================
 
-FROM dealii/dealii:V9.5.2-jammy
+FROM dealii/dealii:v9.7.1-jammy
+
+# ------ 切换到 root 以安装系统依赖（v9.7 镜像默认非 root 用户）-----------------
+USER root
+
+# ------ 替换 apt 源为国内镜像（避免 ports.ubuntu.com 在国内被墙）--------------
+RUN sed -i \
+      's|http://ports.ubuntu.com/ubuntu-ports|http://mirrors.aliyun.com/ubuntu-ports|g; \
+       s|http://archive.ubuntu.com/ubuntu|http://mirrors.aliyun.com/ubuntu|g; \
+       s|http://security.ubuntu.com/ubuntu|http://mirrors.aliyun.com/ubuntu|g' \
+      /etc/apt/sources.list
 
 # ------ 系统依赖 ---------------------------------------------------------------
 RUN apt-get update -qq && \

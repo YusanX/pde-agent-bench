@@ -350,6 +350,7 @@ if __name__ == "__main__":
                 "Please install Docker: https://docs.docker.com/get-docker/"
             )
         _project_root = str(Path(__file__).resolve().parents[2])
+        docker_inner_cmd = ["python3"] + _inner_cmd[1:]
         cmd = [
             "docker", "run", "--rm",
             "-v", f"{outdir}:{outdir}",
@@ -357,7 +358,7 @@ if __name__ == "__main__":
             "-v", f"{_project_root}:{_project_root}",
             "-e", f"PYTHONPATH={_project_root}",
             docker_image,
-        ] + _inner_cmd
+        ] + docker_inner_cmd
     else:
         cmd = _inner_cmd
 

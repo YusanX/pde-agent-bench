@@ -65,10 +65,17 @@ struct OutputGridSpec {
 };
 
 struct SolverSpec {
-  std::string ksp_type  = "cg";
-  std::string pc_type   = "hypre";
-  double      rtol      = 1e-10;
-  double      atol      = 1e-12;
+  std::string ksp_type              = "cg";
+  std::string pc_type               = "hypre";
+  std::string pressure_fixing       = "point";
+  std::string stabilization         = "none";
+  std::string init                  = "zero";  // "zero" | "continuation"
+  double      rtol                  = 1e-10;
+  double      atol                  = 1e-12;
+  double      upwind_parameter      = 1.0;
+  int         max_it                = 200000;
+  double      continuation_nu_start = 1.0;
+  int         continuation_steps    = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -84,6 +91,8 @@ struct CaseSpec {
 
   // Raw PDE node – PDE-specific fields read directly in each solver
   nlohmann::json pde;
+  // Raw BC node – needed by vector-valued solvers with boundary subsets
+  nlohmann::json bc;
   // Raw time node (heat / convection-diffusion / reaction-diffusion)
   nlohmann::json time_cfg;
   // Raw pde_params node (Stokes ν, NS ν, CD ε/β, Helmholtz k²)
@@ -130,6 +139,10 @@ inline CaseSpec read_case_spec(const std::string& filepath) {
   if (j.contains("domain"))
     spec.domain.type = j["domain"].value("type", "unit_square");
 
+  // ---- Boundary conditions ------------------------------------------------
+  if (j.contains("bc"))
+    spec.bc = j["bc"];
+
   // ---- Mesh ---------------------------------------------------------------
   if (j.contains("mesh")) {
     spec.mesh.resolution = j["mesh"].value("resolution", 64);
@@ -159,10 +172,17 @@ inline CaseSpec read_case_spec(const std::string& filepath) {
   // ---- Oracle solver -------------------------------------------------------
   if (j.contains("oracle_solver")) {
     auto& s = j["oracle_solver"];
-    spec.oracle_solver.ksp_type = s.value("ksp_type", "cg");
-    spec.oracle_solver.pc_type  = s.value("pc_type",  "hypre");
-    spec.oracle_solver.rtol     = s.value("rtol",     1e-10);
-    spec.oracle_solver.atol     = s.value("atol",     1e-12);
+    spec.oracle_solver.ksp_type              = s.value("ksp_type",              "cg");
+    spec.oracle_solver.pc_type               = s.value("pc_type",               "hypre");
+    spec.oracle_solver.pressure_fixing       = s.value("pressure_fixing",       "point");
+    spec.oracle_solver.stabilization         = s.value("stabilization",         "none");
+    spec.oracle_solver.init                  = s.value("init",                  "zero");
+    spec.oracle_solver.rtol                  = s.value("rtol",                  1e-10);
+    spec.oracle_solver.atol                  = s.value("atol",                  1e-12);
+    spec.oracle_solver.upwind_parameter      = s.value("upwind_parameter",      1.0);
+    spec.oracle_solver.max_it                = s.value("max_it",                200000);
+    spec.oracle_solver.continuation_nu_start = s.value("continuation_nu_start", 1.0);
+    spec.oracle_solver.continuation_steps    = s.value("continuation_steps",    0);
   }
 
   return spec;
