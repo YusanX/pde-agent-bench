@@ -4,15 +4,16 @@
 
 验证每个 case 的 ground truth 是否都能正确生成。
 支持多后端：dolfinx（默认）、firedrake、dealii。
+firedrake 和 dealii 默认在 Docker 容器内运行，无需本机安装。
 
 用法示例：
-  # 测试 DOLFINx（默认）
+  # 测试 DOLFINx（默认，本机运行）
   python scripts/test_oracle_cases.py --equation-types poisson
 
-  # 测试 Firedrake（需先 source venv-firedrake/bin/activate）
+  # 测试 Firedrake（自动使用 Docker）
   python scripts/test_oracle_cases.py --solver-library firedrake --equation-types poisson
 
-  # 测试 deal.II（需先设置 DEAL_II_DIR）
+  # 测试 deal.II（自动使用 Docker）
   python scripts/test_oracle_cases.py --solver-library dealii --equation-types poisson
 """
 
@@ -37,42 +38,32 @@ def _normalize_num_dofs(value):
     return int(value)
 
 
-def _import_oracle(solver_library: str):
-    """根据 solver_library 导入对应的 oracle，避免在不同环境下强制交叉依赖。"""
-    if solver_library == "firedrake":
-        try:
-            from pdebench.oracle.firedrake_oracle import FiredrakeOracleSolver
-            return FiredrakeOracleSolver()
-        except ImportError as e:
-            print(f"❌ 无法导入 Firedrake oracle: {e}")
-            print("   请先激活 Firedrake 虚拟环境：source venv-firedrake/bin/activate")
-            sys.exit(1)
-    elif solver_library == "dealii":
-        try:
-            from pdebench.oracle.dealii_oracle import DealIIOracleSolver
-            return DealIIOracleSolver()
-        except ImportError as e:
-            print(f"❌ 无法导入 deal.II oracle: {e}")
-            print("   请先激活 PDEBench Python 环境，并设置 DEAL_II_DIR")
-            sys.exit(1)
-    else:
-        try:
-            from pdebench.oracle import OracleSolver
-            return OracleSolver()
-        except ImportError as e:
-            print(f"❌ 无法导入 DOLFINx oracle: {e}")
-            print("   请先激活含 DOLFINx 的 conda 环境：conda activate pdebench")
-            sys.exit(1)
+def _import_oracle():
+    """导入统一的 Oracle 求解器（支持所有后端及 Docker 模式）。"""
+    try:
+        from pdebench.oracle import OracleSolver
+        return OracleSolver()
+    except ImportError as e:
+        print(f"❌ 无法导入 Oracle: {e}")
+        print("   请先激活含 DOLFINx 的 conda 环境：conda activate pdebench")
+        sys.exit(1)
 
 
-def load_all_cases(data_file: Path, equation_types: List[str] | None = None) -> List[Dict[str, Any]]:
-    """加载所有 cases，可按方程类型过滤"""
+def load_all_cases(
+    data_file: Path,
+    equation_types: List[str] | None = None,
+    case_ids: List[str] | None = None,
+) -> List[Dict[str, Any]]:
+    """加载所有 cases，可按方程类型或 case ID 过滤"""
     cases = []
     eq_types = [t.lower() for t in equation_types] if equation_types else None
+    id_set = set(case_ids) if case_ids else None
     with open(data_file) as f:
         for line in f:
             if line.strip():
                 case = json.loads(line)
+                if id_set is not None and case.get('id') not in id_set:
+                    continue
                 if eq_types is not None:
                     pde_type = case.get('oracle_config', {}).get('pde', {}).get('type', '').lower()
                     if pde_type not in eq_types:
@@ -85,6 +76,8 @@ def test_oracle_case(
     case: Dict[str, Any],
     oracle_solver,
     solver_library: str = "dolfinx",
+    use_docker: bool = False,
+    docker_image: str = None,
 ) -> Dict[str, Any]:
     """
     测试单个 case 的 Oracle 求解器
@@ -107,13 +100,13 @@ def test_oracle_case(
     try:
         start_time = time.time()
         
-        # 运行 Oracle 求解器
-        # Firedrake/deal.II oracle 直接 .solve(spec)；
-        # DOLFINx unified oracle 需要 solver_library 参数。
-        if solver_library in {"firedrake", "dealii"}:
-            oracle_result = oracle_solver.solve(case['oracle_config'])
-        else:
-            oracle_result = oracle_solver.solve(case['oracle_config'], solver_library=solver_library)
+        # 运行统一 Oracle 求解器（支持多库及 Docker 模式）
+        oracle_result = oracle_solver.solve(
+            case['oracle_config'],
+            solver_library=solver_library,
+            use_docker=use_docker,
+            docker_image=docker_image,
+        )
         
         elapsed_time = time.time() - start_time
         
@@ -171,6 +164,13 @@ def main():
         help='Equation type(s) to test, e.g., poisson heat',
     )
     parser.add_argument(
+        '--case-ids',
+        nargs='+',
+        default=None,
+        metavar='CASE_ID',
+        help='Specific case ID(s) to test, e.g., stokes_basic stokes_no_exact_lid_driven_cavity',
+    )
+    parser.add_argument(
         '--solver-library',
         default='dolfinx',
         choices=['dolfinx', 'firedrake', 'dealii'],
@@ -189,11 +189,16 @@ def main():
     args = parser.parse_args()
 
     solver_library = args.solver_library
+    # dealii 和 firedrake 默认在 Docker 内运行，无需本机安装
+    use_docker = solver_library in ('dealii', 'firedrake')
 
     print("="*70)
     print("🧪 PDEBench Oracle Cases Test")
     print("="*70)
     print(f"📚 Solver Library: {solver_library}")
+    if use_docker:
+        _img = f"pdebench/{solver_library}:latest"
+        print(f"🐳 Docker Mode: {_img}")
     print()
 
     # 加载所有 cases
@@ -208,14 +213,23 @@ def main():
         sys.exit(1)
 
     print(f"📁 Loading cases from: {data_file}")
-    cases = load_all_cases(data_file, equation_types=args.equation_types)
+    cases = load_all_cases(
+        data_file,
+        equation_types=args.equation_types,
+        case_ids=args.case_ids,
+    )
     if args.equation_types:
         print(f"🎯 Filtered equation types: {', '.join(args.equation_types)}")
+    if args.case_ids:
+        print(f"🎯 Filtered case IDs: {', '.join(args.case_ids)}")
+        missing = set(args.case_ids) - {c['id'] for c in cases}
+        if missing:
+            print(f"⚠️  Case ID(s) not found in data file: {', '.join(sorted(missing))}")
     print(f"✅ Loaded {len(cases)} cases")
     print()
 
     # 创建 Oracle 求解器
-    oracle_solver = _import_oracle(solver_library)
+    oracle_solver = _import_oracle()
 
     # 测试所有 cases
     print(f"🔬 Testing Oracle solver ({solver_library}) for each case...")
@@ -234,7 +248,11 @@ def main():
         print(f"[{i}/{len(cases)}] Testing: {case_id:<40}", end='', flush=True)
 
         # 测试
-        result = test_oracle_case(case, oracle_solver, solver_library=solver_library)
+        result = test_oracle_case(
+            case, oracle_solver,
+            solver_library=solver_library,
+            use_docker=use_docker,
+        )
         results.append(result)
         
         if result['success']:
