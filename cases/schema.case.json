@@ -87,13 +87,27 @@
       "domain": {
         "type": "object",
         "required": ["type"],
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "type": {
             "type": "string",
-            "enum": ["unit_square"],
-            "description": "Demo uses unit_square only; extend later."
-          }
+            "enum": [
+              "unit_square", "l_shape", "annulus", "gear",
+              "square_with_hole", "multi_hole", "t_junction",
+              "eccentric_annulus", "dumbbell"
+            ],
+            "description": "Domain type."
+          },
+          "inner_radius": { "type": "number", "default": 0.3 },
+          "outer_radius": { "type": "number", "default": 1.0 },
+          "offset": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "For eccentric annulus [dx, dy]" },
+          "holes": {
+            "type": "array",
+            "items": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+            "description": "List of [x, y, r]"
+          },
+          "num_teeth": { "type": "integer", "default": 12, "description": "For gear shape" },
+          "bar_width": { "type": "number", "default": 0.2, "description": "For dumbbell/T-junction bar width" }
         }
       },
   
@@ -105,7 +119,7 @@
           "resolution": {
             "type": "integer",
             "minimum": 4,
-            "description": "Mesh resolution parameter (e.g., N for UnitSquareMesh)."
+            "description": "Mesh resolution (inverse of characteristic length)."
           },
           "cell_type": {
             "type": "string",
