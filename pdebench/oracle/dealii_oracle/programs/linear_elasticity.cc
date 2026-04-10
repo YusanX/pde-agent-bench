@@ -1,21 +1,22 @@
 /**
  * linear_elasticity.cc  –  deal.II oracle for linear elasticity
  *
- *   -∇·σ(u) = f   in Ω = [0,1]²
+ *   -∇·σ(u) = f   in Ω = [0,1]^d
  *         u = g   on ∂Ω
  *
- *   σ = λ(∇·u)I + μ(∇u + ∇uᵀ)   (Cauchy stress, plane stress/strain)
+ *   σ = λ tr(ε(u)) I + 2 μ ε(u),   ε(u) = sym(∇u)
  *
- * FE space: Q2 Taylor-Hood or Q1 vector Lagrange (degree from case_spec).
- * Output:   velocity / displacement magnitude  ‖u‖ = √(u₁²+u₂²).
+ * Supports both 2-D and 3-D unit domains.
  */
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cctype>
 #include <filesystem>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -36,6 +37,8 @@
 #include <deal.II/lac/full_matrix.h>
 #include <deal.II/lac/precondition.h>
 #include <deal.II/lac/solver_cg.h>
+#include <deal.II/lac/solver_gmres.h>
+#include <deal.II/lac/sparse_direct.h>
 #include <deal.II/lac/sparse_matrix.h>
 #include <deal.II/lac/sparsity_pattern.h>
 #include <deal.II/lac/vector.h>
@@ -45,12 +48,12 @@
 #include "grid_writer.h"
 
 using namespace dealii;
-namespace { static const std::map<std::string, double> MU_CONST = {{"pi", M_PI}}; }
 
 namespace {
 
-std::string json_to_expr(const nlohmann::json &value)
-{
+static const std::map<std::string, double> MU_CONST = {{"pi", M_PI}};
+
+std::string json_to_expr(const nlohmann::json &value) {
   if (value.is_string())
     return value.get<std::string>();
   if (value.is_number())
@@ -58,23 +61,26 @@ std::string json_to_expr(const nlohmann::json &value)
   return "0.0";
 }
 
-std::pair<std::string, std::string> json_to_vector_exprs(const nlohmann::json &value)
-{
-  if (value.is_array() && value.size() >= 2)
-    return {json_to_expr(value[0]), json_to_expr(value[1])};
+template <int dim>
+std::vector<std::string> json_to_vector_exprs(const nlohmann::json &value) {
+  std::vector<std::string> out(dim, "0.0");
+  if (value.is_array()) {
+    for (unsigned int d = 0; d < dim && d < value.size(); ++d)
+      out[d] = json_to_expr(value[d]);
+    return out;
+  }
 
   const std::string scalar = json_to_expr(value);
-  return {scalar, scalar};
+  std::fill(out.begin(), out.end(), scalar);
+  return out;
 }
 
-std::vector<nlohmann::json> normalize_dirichlet_cfg(const nlohmann::json &bc)
-{
+std::vector<nlohmann::json> normalize_dirichlet_cfg(const nlohmann::json &bc) {
   if (bc.is_null() || !bc.contains("dirichlet"))
     return {};
 
   const auto &dirichlet = bc["dirichlet"];
-  if (dirichlet.is_array())
-  {
+  if (dirichlet.is_array()) {
     std::vector<nlohmann::json> out;
     for (const auto &cfg : dirichlet)
       out.push_back(cfg);
@@ -85,13 +91,26 @@ std::vector<nlohmann::json> normalize_dirichlet_cfg(const nlohmann::json &bc)
   return {};
 }
 
-std::vector<types::boundary_id> boundary_ids_for_selector(const std::string &on)
-{
+template <int dim>
+std::vector<types::boundary_id> all_boundary_ids();
+
+template <>
+std::vector<types::boundary_id> all_boundary_ids<2>() {
+  return {0, 1, 2, 3};
+}
+
+template <>
+std::vector<types::boundary_id> all_boundary_ids<3>() {
+  return {0, 1, 2, 3, 4, 5};
+}
+
+template <int dim>
+std::vector<types::boundary_id> boundary_ids_for_selector(const std::string &on) {
   std::string key = on;
   std::transform(key.begin(), key.end(), key.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   if (key == "all" || key == "*")
-    return {0, 1, 2, 3};
+    return all_boundary_ids<dim>();
   if (key == "x0" || key == "xmin")
     return {0};
   if (key == "x1" || key == "xmax")
@@ -100,60 +119,80 @@ std::vector<types::boundary_id> boundary_ids_for_selector(const std::string &on)
     return {2};
   if (key == "y1" || key == "ymax")
     return {3};
+  if constexpr (dim == 3) {
+    if (key == "z0" || key == "zmin")
+      return {4};
+    if (key == "z1" || key == "zmax")
+      return {5};
+  }
 
   throw std::runtime_error("Unknown linear_elasticity boundary selector: " + on);
 }
 
-}  // namespace
+template <int dim>
+std::string coordinate_vars() {
+  return dim == 2 ? "x,y" : "x,y,z";
+}
 
-// Vector BC function: components (ux, uy) provided as two separate expressions
-class VectorBCFunc : public Function<2> {
+template <int dim>
+class VectorBCFunc : public Function<dim> {
  public:
-  VectorBCFunc(const std::string& expr_x, const std::string& expr_y)
-      : Function<2>(2), fx_(1), fy_(1) {
-    std::map<std::string, double> c = {{"pi", M_PI}};
-    fx_.initialize("x,y", expr_x, c, false);
-    fy_.initialize("x,y", expr_y, c, false);
+  explicit VectorBCFunc(const std::vector<std::string>& exprs)
+      : Function<dim>(dim) {
+    if (exprs.size() != dim)
+      throw std::runtime_error("VectorBCFunc expression count mismatch");
+    for (unsigned int d = 0; d < dim; ++d)
+    {
+      funcs_[d] = std::make_unique<FunctionParser<dim>>(1);
+      funcs_[d]->initialize(coordinate_vars<dim>(), exprs[d], MU_CONST, false);
+    }
   }
-  double value(const Point<2>& p, unsigned int comp = 0) const override {
-    return (comp == 0) ? fx_.value(p) : fy_.value(p);
+
+  double value(const Point<dim>& p, unsigned int comp = 0) const override {
+    return funcs_[comp]->value(p);
   }
-  void vector_value(const Point<2>& p, Vector<double>& v) const override {
-    v(0) = fx_.value(p); v(1) = fy_.value(p);
+
+  void vector_value(const Point<dim>& p, Vector<double>& v) const override {
+    for (unsigned int d = 0; d < dim; ++d)
+      v(d) = funcs_[d]->value(p);
   }
+
  private:
-  mutable FunctionParser<2> fx_, fy_;
+  std::array<std::unique_ptr<FunctionParser<dim>>, dim> funcs_;
 };
 
+}  // namespace
+
+template <int dim>
 class LinearElasticityOracle {
  public:
   explicit LinearElasticityOracle(const CaseSpec& s)
-      : spec_(s),
-        fe_(FE_Q<2>(s.fem.degree), 2),   // vector Q_p space
-        dh_(tria_) {
+      : spec_(s), fe_(FE_Q<dim>(s.fem.degree), dim), dh_(tria_) {
     lam_ = std::stod(spec_.pde.value("_computed_lambda", "1.0"));
-    mu_  = std::stod(spec_.pde.value("_computed_mu",     "1.0"));
+    mu_  = std::stod(spec_.pde.value("_computed_mu", "1.0"));
   }
 
   void run(const std::string& outdir) {
     std::filesystem::create_directories(outdir);
-    Timer timer; timer.start();
-    make_mesh(); setup_system(); assemble(); solve();
+    Timer timer;
+    timer.start();
+    make_mesh();
+    setup_system();
+    assemble();
+    solve();
     timer.stop();
 
-    // Write vector magnitude grid
-    oracle_util::write_vector_magnitude_grid(dh_, u_,
-        spec_.output_grid.bbox, spec_.output_grid.nx, spec_.output_grid.ny,
-        outdir, timer.wall_time(),
-        spec_.oracle_solver.ksp_type, spec_.oracle_solver.pc_type,
-        spec_.oracle_solver.rtol);
+    oracle_util::write_vector_magnitude_grid<dim>(
+        dh_, u_, spec_.output_grid.bbox, spec_.output_grid.nx, spec_.output_grid.ny,
+        spec_.output_grid.nz, outdir, timer.wall_time(), spec_.oracle_solver.ksp_type,
+        spec_.oracle_solver.pc_type, spec_.oracle_solver.rtol);
   }
 
  private:
   const CaseSpec&            spec_;
-  Triangulation<2>           tria_;
-  FESystem<2>                fe_;
-  DoFHandler<2>              dh_;
+  Triangulation<dim>         tria_;
+  FESystem<dim>              fe_;
+  DoFHandler<dim>            dh_;
   AffineConstraints<double>  cons_;
   SparsityPattern            sp_;
   SparseMatrix<double>       K_;
@@ -163,7 +202,7 @@ class LinearElasticityOracle {
   void make_mesh() {
     GridGenerator::subdivided_hyper_cube(tria_, spec_.mesh.resolution, 0.0, 1.0);
     for (const auto &cell : tria_.active_cell_iterators()) {
-      for (unsigned int face_no = 0; face_no < GeometryInfo<2>::faces_per_cell; ++face_no) {
+      for (unsigned int face_no = 0; face_no < GeometryInfo<dim>::faces_per_cell; ++face_no) {
         const auto face = cell->face(face_no);
         if (!face->at_boundary())
           continue;
@@ -177,6 +216,12 @@ class LinearElasticityOracle {
           face->set_boundary_id(2);
         else if (std::abs(c[1] - 1.0) < 1e-12)
           face->set_boundary_id(3);
+        else if constexpr (dim == 3) {
+          if (std::abs(c[2] - 0.0) < 1e-12)
+            face->set_boundary_id(4);
+          else if (std::abs(c[2] - 1.0) < 1e-12)
+            face->set_boundary_id(5);
+        }
       }
     }
   }
@@ -186,10 +231,13 @@ class LinearElasticityOracle {
     cons_.clear();
 
     if (spec_.has_exact()) {
-      const std::string bc_x = spec_.pde.value("_computed_bc_x", "0.0");
-      const std::string bc_y = spec_.pde.value("_computed_bc_y", "0.0");
-      VectorBCFunc bc_func(bc_x, bc_y);
-      for (const auto boundary_id : boundary_ids_for_selector("all")) {
+      std::vector<std::string> bc_exprs = {
+          spec_.pde.value("_computed_bc_x", "0.0"),
+          spec_.pde.value("_computed_bc_y", "0.0")};
+      if constexpr (dim == 3)
+        bc_exprs.push_back(spec_.pde.value("_computed_bc_z", "0.0"));
+      VectorBCFunc<dim> bc_func(bc_exprs);
+      for (const auto boundary_id : all_boundary_ids<dim>()) {
         VectorTools::interpolate_boundary_values(
             dh_, boundary_id, bc_func, cons_, ComponentMask());
       }
@@ -197,10 +245,9 @@ class LinearElasticityOracle {
       for (const auto &cfg : normalize_dirichlet_cfg(spec_.bc)) {
         const std::string on = cfg.value("on", "all");
         const nlohmann::json value =
-            cfg.contains("value") ? cfg["value"] : nlohmann::json(std::vector<std::string>{"0.0", "0.0"});
-        const auto [bc_x, bc_y] = json_to_vector_exprs(value);
-        VectorBCFunc bc_func(bc_x, bc_y);
-        for (const auto boundary_id : boundary_ids_for_selector(on)) {
+            cfg.contains("value") ? cfg["value"] : nlohmann::json(std::vector<std::string>(dim, "0.0"));
+        VectorBCFunc<dim> bc_func(json_to_vector_exprs<dim>(value));
+        for (const auto boundary_id : boundary_ids_for_selector<dim>(on)) {
           VectorTools::interpolate_boundary_values(
               dh_, boundary_id, bc_func, cons_, ComponentMask());
         }
@@ -217,45 +264,51 @@ class LinearElasticityOracle {
   }
 
   void assemble() {
-    const std::string fx_expr = spec_.pde.value("_computed_source_x", "0.0");
-    const std::string fy_expr = spec_.pde.value("_computed_source_y", "0.0");
-    std::map<std::string, double> c = {{"pi", M_PI}};
-    FunctionParser<2> fx(1), fy(1);
-    fx.initialize("x,y", fx_expr, c, false);
-    fy.initialize("x,y", fy_expr, c, false);
+    std::vector<std::string> f_exprs = {
+        spec_.pde.value("_computed_source_x", "0.0"),
+        spec_.pde.value("_computed_source_y", "0.0")};
+    if constexpr (dim == 3)
+      f_exprs.push_back(spec_.pde.value("_computed_source_z", "0.0"));
 
-    QGauss<2>   quad(fe_.degree + 1);
-    FEValues<2> fev(fe_, quad,
-                    update_values | update_gradients |
-                    update_JxW_values | update_quadrature_points);
+    std::array<std::unique_ptr<FunctionParser<dim>>, dim> f_funcs;
+    for (unsigned int d = 0; d < dim; ++d)
+    {
+      f_funcs[d] = std::make_unique<FunctionParser<dim>>(1);
+      f_funcs[d]->initialize(coordinate_vars<dim>(), f_exprs[d], MU_CONST, false);
+    }
+
+    QGauss<dim>   quad(fe_.degree + 1);
+    FEValues<dim> fev(fe_, quad,
+                      update_values | update_gradients |
+                      update_JxW_values | update_quadrature_points);
 
     const FEValuesExtractors::Vector displ(0);
     const unsigned int n = fe_.n_dofs_per_cell();
-    FullMatrix<double> Ke(n, n); Vector<double> Fe(n);
+    FullMatrix<double> Ke(n, n);
+    Vector<double>     Fe(n);
     std::vector<types::global_dof_index> ids(n);
 
     for (auto& cell : dh_.active_cell_iterators()) {
-      fev.reinit(cell); Ke = 0; Fe = 0;
+      fev.reinit(cell);
+      Ke = 0;
+      Fe = 0;
       for (unsigned int q = 0; q < quad.size(); ++q) {
-        const Point<2>& qp  = fev.quadrature_point(q);
-        const double    JxW = fev.JxW(q);
+        const Point<dim>& qp  = fev.quadrature_point(q);
+        const double      JxW = fev.JxW(q);
 
-        // body force
-        Tensor<1, 2> f_vec;
-        f_vec[0] = fx.value(qp);
-        f_vec[1] = fy.value(qp);
+        Tensor<1, dim> f_vec;
+        for (unsigned int d = 0; d < dim; ++d)
+          f_vec[d] = f_funcs[d]->value(qp);
 
         for (unsigned int i = 0; i < n; ++i) {
-          // symmetric strain tensor for test function i
-          SymmetricTensor<2,2> eps_i = fev[displ].symmetric_gradient(i, q);
-          Tensor<1,2>          vi    = fev[displ].value(i, q);
+          const SymmetricTensor<2, dim> eps_i = fev[displ].symmetric_gradient(i, q);
+          const Tensor<1, dim>          vi    = fev[displ].value(i, q);
+          const double                  tr_i  = trace(eps_i);
 
           for (unsigned int j = 0; j < n; ++j) {
-            SymmetricTensor<2,2> eps_j = fev[displ].symmetric_gradient(j, q);
-            // σ(u_j) : ε(v_i)
-            double trace_j = eps_j[0][0] + eps_j[1][1];
-            double sigma_eps = lam_ * trace_j * (eps_i[0][0] + eps_i[1][1])
-                             + 2.0 * mu_ * scalar_product(eps_i, eps_j);
+            const SymmetricTensor<2, dim> eps_j = fev[displ].symmetric_gradient(j, q);
+            const double                  tr_j  = trace(eps_j);
+            const double sigma_eps = lam_ * tr_j * tr_i + 2.0 * mu_ * scalar_product(eps_i, eps_j);
             Ke(i, j) += sigma_eps * JxW;
           }
           Fe(i) += vi * f_vec * JxW;
@@ -267,11 +320,28 @@ class LinearElasticityOracle {
   }
 
   void solve() {
+    const std::string ksp = spec_.oracle_solver.ksp_type;
+    const std::string pc  = spec_.oracle_solver.pc_type;
+
+    if (pc == "lu" || pc == "direct" || pc == "mumps" || ksp == "preonly") {
+      SparseDirectUMFPACK direct;
+      direct.initialize(K_);
+      direct.vmult(u_, rhs_);
+      cons_.distribute(u_);
+      return;
+    }
+
     ReductionControl ctrl(50000, spec_.oracle_solver.atol, spec_.oracle_solver.rtol);
     PreconditionSSOR<SparseMatrix<double>> prec;
     prec.initialize(K_, 1.2);
-    SolverCG<Vector<double>> cg(ctrl);
-    cg.solve(K_, u_, rhs_, prec);
+
+    if (ksp == "gmres") {
+      SolverGMRES<Vector<double>> gmres(ctrl);
+      gmres.solve(K_, u_, rhs_, prec);
+    } else {
+      SolverCG<Vector<double>> cg(ctrl);
+      cg.solve(K_, u_, rhs_, prec);
+    }
     cons_.distribute(u_);
   }
 };
@@ -281,7 +351,13 @@ int main(int argc, char* argv[]) {
     std::cerr << "Usage: linear_elasticity_solver <case_spec.json> <outdir>\n";
     return 1;
   }
-  try { LinearElasticityOracle(read_case_spec(argv[1])).run(argv[2]); }
+  try {
+    const CaseSpec spec = read_case_spec(argv[1]);
+    if (spec.output_grid.is_3d() || spec.domain.type == "unit_cube")
+      LinearElasticityOracle<3>(spec).run(argv[2]);
+    else
+      LinearElasticityOracle<2>(spec).run(argv[2]);
+  }
   catch (const std::exception& e) { std::cerr << "ERROR: " << e.what() << "\n"; return 1; }
   return 0;
 }

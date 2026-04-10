@@ -37,6 +37,9 @@ from .common import (
     parse_expression,
     parse_vector_expression,
     sample_vector_magnitude_on_grid,
+    _sample_vector_mag_grid,
+    _mms_local_dict,
+    _mms_coords,
 )
 
 
@@ -77,6 +80,11 @@ def _boundary_selector(on: str, dim: int):
             return lambda x: np.isclose(x[1], 0.0)
         if key in {"y1", "ymax"}:
             return lambda x: np.isclose(x[1], 1.0)
+    if dim >= 3:
+        if key in {"z0", "zmin"}:
+            return lambda x: np.isclose(x[2], 0.0)
+        if key in {"z1", "zmax"}:
+            return lambda x: np.isclose(x[2], 1.0)
     raise ValueError(f"Unknown boundary selector: {on}")
 
 
@@ -160,8 +168,6 @@ class LinearElasticitySolver:
         
         msh = create_mesh(case_spec["domain"], case_spec["mesh"])
         dim = msh.geometry.dim
-        if dim != 2:
-            raise ValueError("linear_elasticity oracle currently supports 2D only")
 
         V = create_vector_space(
             msh, case_spec["fem"]["family"], case_spec["fem"]["degree"]
@@ -178,41 +184,37 @@ class LinearElasticitySolver:
         u_exact = None
 
         if "u" in manufactured:
-            u_sym = manufactured["u"]
-            if not isinstance(u_sym, (list, tuple)) or len(u_sym) != dim:
-                raise ValueError("manufactured_solution.u must be a 2-component list for linear_elasticity")
+            u_sym_list = manufactured["u"]
+            if not isinstance(u_sym_list, (list, tuple)) or len(u_sym_list) != dim:
+                raise ValueError(
+                    f"manufactured_solution.u must be a {dim}-component list for linear_elasticity"
+                )
 
-            sx, sy = sp.symbols("x y", real=True)
-            local_dict = {"x": sx, "y": sy, "pi": sp.pi}
-            u1 = sp.sympify(u_sym[0], locals=local_dict)
-            u2 = sp.sympify(u_sym[1], locals=local_dict)
+            local_dict = _mms_local_dict(dim)
+            coords = _mms_coords(dim)
 
-            # small-strain tensor eps = sym(grad u)
-            du1x = sp.diff(u1, sx)
-            du1y = sp.diff(u1, sy)
-            du2x = sp.diff(u2, sx)
-            du2y = sp.diff(u2, sy)
-            eps11 = du1x
-            eps22 = du2y
-            eps12 = sp.Rational(1, 2) * (du1y + du2x)
-            tr_eps = eps11 + eps22
+            u_comps = [sp.sympify(u_sym_list[i], locals=local_dict) for i in range(dim)]
 
             lam_s = sp.sympify(lam)
             mu_s = sp.sympify(mu)
-            # sigma = 2 mu eps + lam tr(eps) I
-            sig11 = 2 * mu_s * eps11 + lam_s * tr_eps
-            sig22 = 2 * mu_s * eps22 + lam_s * tr_eps
-            sig12 = 2 * mu_s * eps12
-            sig21 = sig12
 
-            # f = -div(sigma)
-            f1 = -(sp.diff(sig11, sx) + sp.diff(sig12, sy))
-            f2 = -(sp.diff(sig21, sx) + sp.diff(sig22, sy))
+            # Build full strain tensor eps[i][j] = sym(grad u)[i][j]
+            eps = [[sp.Rational(1, 2) * (sp.diff(u_comps[i], coords[j]) + sp.diff(u_comps[j], coords[i]))
+                    for j in range(dim)] for i in range(dim)]
+            tr_eps = sum(eps[i][i] for i in range(dim))
+
+            # sigma[i][j] = 2*mu*eps[i][j] + lam*tr(eps)*delta[i][j]
+            sigma = [[2 * mu_s * eps[i][j] + (lam_s * tr_eps if i == j else 0)
+                      for j in range(dim)] for i in range(dim)]
+
+            # f[i] = -div(sigma)[i] = -sum_j d sigma[i][j] / d x_j
+            f_comps = [-(sum(sp.diff(sigma[i][j], coords[j]) for j in range(dim)))
+                       for i in range(dim)]
 
             x = ufl.SpatialCoordinate(msh)
-            f_expr = parse_vector_expression([f1, f2], x)
+            f_expr = parse_vector_expression(f_comps, x)
 
-            u_exact_expr = parse_vector_expression([u1, u2], x)
+            u_exact_expr = parse_vector_expression(u_comps, x)
             u_exact = fem.Function(V)
             interpolate_expression(u_exact, u_exact_expr)
         else:
@@ -257,9 +259,7 @@ class LinearElasticitySolver:
         u_h = problem.solve()
 
         grid_cfg = case_spec["output"]["grid"]
-        _, _, u_mag = sample_vector_magnitude_on_grid(
-            u_h, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-        )
+        u_mag = _sample_vector_mag_grid(u_h, grid_cfg)
 
         baseline_error = 0.0
         solver_info: Dict[str, Any] = {
@@ -269,13 +269,11 @@ class LinearElasticitySolver:
             "pc_type": petsc_options["pc_type"],
             "rtol": petsc_options["ksp_rtol"],
             "mesh_resolution": case_spec["mesh"].get("resolution"),
-            "cell_type": case_spec["mesh"].get("cell_type", "triangle"),
+            "cell_type": case_spec["mesh"].get("cell_type", "tetrahedron" if dim == 3 else "triangle"),
         }
 
         if u_exact is not None:
-            _, _, u_exact_mag = sample_vector_magnitude_on_grid(
-                u_exact, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-            )
+            u_exact_mag = _sample_vector_mag_grid(u_exact, grid_cfg)
             baseline_error = compute_rel_L2_grid(u_mag, u_exact_mag)
             u_mag = u_exact_mag
         else:
@@ -318,9 +316,7 @@ class LinearElasticitySolver:
                 petsc_options_prefix="oracle_linear_elasticity_ref_",
             )
             ref_u_h = ref_problem.solve()
-            _, _, ref_mag = sample_vector_magnitude_on_grid(
-                ref_u_h, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-            )
+            ref_mag = _sample_vector_mag_grid(ref_u_h, grid_cfg)
             baseline_error = compute_rel_L2_grid(u_mag, ref_mag)
             u_mag = ref_mag
             solver_info["reference_resolution"] = ref_mesh_spec.get("resolution")

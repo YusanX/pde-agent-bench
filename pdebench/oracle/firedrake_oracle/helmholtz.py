@@ -96,6 +96,7 @@ class FiredrakeHelmholtzSolver:
         msh = create_mesh(case_spec["domain"], case_spec["mesh"])
         V = create_scalar_space(msh, case_spec["fem"]["family"], case_spec["fem"]["degree"])
         x = SpatialCoordinate(msh)
+        dim = msh.geometric_dimension()
 
         pde_cfg = case_spec["pde"]
         params = pde_cfg.get("pde_params", {})
@@ -106,11 +107,20 @@ class FiredrakeHelmholtzSolver:
         u_exact_fn = None
         f_ufl = None
 
+        def _mms_symbols():
+            sx, sy, sz = sp.symbols("x y z", real=True)
+            locals_dict = {"x": sx, "y": sy, "pi": sp.pi}
+            coords = [sx, sy]
+            if dim >= 3:
+                locals_dict["z"] = sz
+                coords.append(sz)
+            return locals_dict, tuple(coords)
+
         if "u" in manufactured:
-            sx, sy = sp.symbols("x y", real=True)
-            u_sym = sp.sympify(manufactured["u"], locals={"x": sx, "y": sy, "pi": sp.pi})
+            local_dict, coords = _mms_symbols()
+            u_sym = sp.sympify(manufactured["u"], locals=local_dict)
             k_sym = sp.sympify(k)
-            f_sym = -(sp.diff(u_sym, sx, 2) + sp.diff(u_sym, sy, 2)) - k_sym**2 * u_sym
+            f_sym = -sum(sp.diff(u_sym, c, 2) for c in coords) - k_sym**2 * u_sym
             f_ufl = parse_expression(f_sym, x)
             u_exact_fn = Function(V)
             u_exact_fn.interpolate(parse_expression(u_sym, x))
@@ -137,13 +147,12 @@ class FiredrakeHelmholtzSolver:
         uh, used_sp_dict = _solve_linear_helmholtz(a, L, V, bcs, sp_dict, allow_fallback=True)
 
         grid_cfg = case_spec["output"]["grid"]
-        _, _, u_grid = sample_scalar_on_grid(uh, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"])
+        sample_args = (grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"], grid_cfg.get("nz"))
+        *_, u_grid = sample_scalar_on_grid(uh, *sample_args)
 
         baseline_error = 0.0
         if u_exact_fn is not None:
-            _, _, u_exact_grid = sample_scalar_on_grid(
-                u_exact_fn, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-            )
+            *_, u_exact_grid = sample_scalar_on_grid(u_exact_fn, *sample_args)
             baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
             u_grid = u_exact_grid
         else:
@@ -177,9 +186,7 @@ class FiredrakeHelmholtzSolver:
             ref_uh, _ = _solve_linear_helmholtz(
                 ref_a, ref_L, ref_V, ref_bcs, ref_sp, allow_fallback=True
             )
-            _, _, ref_grid = sample_scalar_on_grid(
-                ref_uh, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-            )
+            *_, ref_grid = sample_scalar_on_grid(ref_uh, *sample_args)
             baseline_error = compute_rel_L2_grid(u_grid, ref_grid)
             u_grid = ref_grid
 

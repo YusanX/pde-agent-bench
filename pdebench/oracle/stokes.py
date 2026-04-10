@@ -20,6 +20,7 @@ from .common import (
     parse_expression,
     parse_vector_expression,
     sample_vector_magnitude_on_grid,
+    _sample_vector_mag_grid,
 )
 
 
@@ -264,17 +265,12 @@ class StokesSolver:
         p_h = w_h.sub(1).collapse()
 
         grid_cfg = case_spec["output"]["grid"]
-        _, _, u_grid = sample_vector_magnitude_on_grid(
-            u_h, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-        )
+        u_grid = _sample_vector_mag_grid(u_h, grid_cfg)
 
         baseline_error = 0.0
         if u_exact is not None:
-            _, _, u_exact_grid = sample_vector_magnitude_on_grid(
-                u_exact, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-            )
+            u_exact_grid = _sample_vector_mag_grid(u_exact, grid_cfg)
             baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
-            # Use exact grid as reference for evaluation alignment.
             u_grid = u_exact_grid
         else:
             ref_cfg = case_spec.get("reference_config", {})
@@ -360,9 +356,7 @@ class StokesSolver:
             )
             ref_w = ref_problem.solve()
             ref_u_h = ref_w.sub(0).collapse()
-            _, _, ref_grid = sample_vector_magnitude_on_grid(
-                ref_u_h, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-            )
+            ref_grid = _sample_vector_mag_grid(ref_u_h, grid_cfg)
             baseline_error = compute_rel_L2_grid(u_grid, ref_grid)
             u_grid = ref_grid
 

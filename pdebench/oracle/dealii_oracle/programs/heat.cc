@@ -1,13 +1,13 @@
 /**
  * heat.cc  –  deal.II oracle for the heat equation
  *
- *   ∂u/∂t - κ Δu = f(x,y,t)   in Ω×(t₀,t_end]
- *   u = g(x,y,t)               on ∂Ω×(t₀,t_end]
- *   u = u₀(x,y)                in Ω at t = t₀
+ *   ∂u/∂t - κ Δu = f(x,t)   in Ω×(t₀,t_end]
+ *   u = g(x,t)              on ∂Ω×(t₀,t_end]
+ *   u = u₀(x)               in Ω at t = t₀
  *
  * Scheme: backward Euler (implicit)  →  (M + dt·K) uⁿ⁺¹ = M·uⁿ + dt·fⁿ⁺¹
  *
- * Output: solution at t = t_end, sampled on uniform nx×ny grid.
+ * Supports both 2-D and 3-D unit domains.
  */
 
 #include <cmath>
@@ -30,6 +30,7 @@
 #include <deal.II/lac/full_matrix.h>
 #include <deal.II/lac/precondition.h>
 #include <deal.II/lac/solver_cg.h>
+#include <deal.II/lac/solver_gmres.h>
 #include <deal.II/lac/sparse_matrix.h>
 #include <deal.II/lac/sparsity_pattern.h>
 #include <deal.II/lac/vector.h>
@@ -40,8 +41,23 @@
 
 using namespace dealii;
 
-namespace { static const std::map<std::string, double> MU_CONST = {{"pi", M_PI}}; }
+namespace {
 
+static const std::map<std::string, double> MU_CONST = {{"pi", M_PI}};
+
+template <int dim>
+void initialize_parser(FunctionParser<dim>& parser,
+                       const std::string& expr,
+                       const bool time_dependent = false) {
+  if (time_dependent)
+    parser.initialize(dim == 2 ? "x,y,t" : "x,y,z,t", expr, MU_CONST, true);
+  else
+    parser.initialize(dim == 2 ? "x,y" : "x,y,z", expr, MU_CONST, false);
+}
+
+}  // namespace
+
+template <int dim>
 class HeatOracle {
  public:
   explicit HeatOracle(const CaseSpec& s)
@@ -57,10 +73,9 @@ class HeatOracle {
     time_march();
 
     timer.stop();
-    oracle_util::write_scalar_grid(
-        dh_, solution_,
-        spec_.output_grid.bbox,
-        spec_.output_grid.nx, spec_.output_grid.ny,
+    oracle_util::write_scalar_grid<dim>(
+        dh_, solution_, spec_.output_grid.bbox,
+        spec_.output_grid.nx, spec_.output_grid.ny, spec_.output_grid.nz,
         outdir, timer.wall_time(),
         spec_.oracle_solver.ksp_type,
         spec_.oracle_solver.pc_type,
@@ -69,9 +84,9 @@ class HeatOracle {
 
  private:
   const CaseSpec&            spec_;
-  Triangulation<2>           tria_;
-  FE_Q<2>                    fe_;
-  DoFHandler<2>              dh_;
+  Triangulation<dim>         tria_;
+  FE_Q<dim>                  fe_;
+  DoFHandler<dim>            dh_;
   AffineConstraints<double>  constraints_;
   SparsityPattern            sp_;
   SparseMatrix<double>       mass_matrix_;
@@ -119,11 +134,11 @@ class HeatOracle {
     if (kappa_expr.empty())
       throw std::runtime_error("Heat oracle: _computed_kappa missing");
 
-    FunctionParser<2> kappa_func(1);
-    kappa_func.initialize("x,y", kappa_expr, MU_CONST, false);
+    FunctionParser<dim> kappa_func(1);
+    initialize_parser<dim>(kappa_func, kappa_expr, false);
 
-    QGauss<2> quad(fe_.degree + 1);
-    FEValues<2> fev(fe_, quad,
+    QGauss<dim> quad(fe_.degree + 1);
+    FEValues<dim> fev(fe_, quad,
                     update_values | update_gradients |
                     update_JxW_values | update_quadrature_points);
 
@@ -155,8 +170,8 @@ class HeatOracle {
   void apply_bc(double t, AffineConstraints<double>& cons) {
     const std::string bc_expr = spec_.computed_bc();
     if (bc_expr.empty()) return;
-    FunctionParser<2> bc_func(1);
-    bc_func.initialize("x,y,t", bc_expr, MU_CONST, true);
+    FunctionParser<dim> bc_func(1);
+    initialize_parser<dim>(bc_func, bc_expr, true);
     bc_func.set_time(t);
     cons.clear();
     VectorTools::interpolate_boundary_values(dh_, 0, bc_func, cons);
@@ -165,8 +180,8 @@ class HeatOracle {
 
   void set_initial_condition() {
     const std::string ic_expr = spec_.pde.value("_computed_ic", "0.0");
-    FunctionParser<2> ic_func(1);
-    ic_func.initialize("x,y", ic_expr, MU_CONST, false);
+    FunctionParser<dim> ic_func(1);
+    initialize_parser<dim>(ic_func, ic_expr, false);
     VectorTools::interpolate(dh_, ic_func, solution_);
   }
 
@@ -176,11 +191,11 @@ class HeatOracle {
 
     const std::string src_expr = spec_.computed_source();
     const bool has_src = !src_expr.empty();
-    FunctionParser<2> src_func(1);
+    FunctionParser<dim> src_func(1);
     if (has_src)
-      src_func.initialize("x,y,t", src_expr, MU_CONST, true);
+      initialize_parser<dim>(src_func, src_expr, true);
 
-    QGauss<2> quad(fe_.degree + 1);
+    QGauss<dim> quad(fe_.degree + 1);
 
     double t = t0_;
     while (t < t_end_ - 1e-12 * dt_) {
@@ -208,7 +223,7 @@ class HeatOracle {
       // Add source term contribution dt·∫f v dx
       if (has_src) {
         src_func.set_time(t);
-        FEValues<2> fev(fe_, quad,
+        FEValues<dim> fev(fe_, quad,
                         update_values | update_JxW_values | update_quadrature_points);
         const unsigned int n = fe_.n_dofs_per_cell();
         Vector<double>     fe(n);
@@ -232,8 +247,13 @@ class HeatOracle {
       ReductionControl ctrl(50000, spec_.oracle_solver.atol, spec_.oracle_solver.rtol);
       PreconditionSSOR<SparseMatrix<double>> prec;
       prec.initialize(system_matrix_, 1.2);
-      SolverCG<Vector<double>> cg(ctrl);
-      cg.solve(system_matrix_, solution_, system_rhs_, prec);
+      if (spec_.oracle_solver.ksp_type == "gmres") {
+        SolverGMRES<Vector<double>> gmres(ctrl);
+        gmres.solve(system_matrix_, solution_, system_rhs_, prec);
+      } else {
+        SolverCG<Vector<double>> cg(ctrl);
+        cg.solve(system_matrix_, solution_, system_rhs_, prec);
+      }
       cons.distribute(solution_);
 
       old_solution_ = solution_;
@@ -248,8 +268,10 @@ int main(int argc, char* argv[]) {
   }
   try {
     const CaseSpec spec = read_case_spec(argv[1]);
-    HeatOracle oracle(spec);
-    oracle.run(argv[2]);
+    if (spec.output_grid.is_3d() || spec.domain.type == "unit_cube")
+      HeatOracle<3>(spec).run(argv[2]);
+    else
+      HeatOracle<2>(spec).run(argv[2]);
   } catch (const std::exception& e) {
     std::cerr << "ERROR: " << e.what() << "\n"; return 1;
   }

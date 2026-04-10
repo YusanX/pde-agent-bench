@@ -20,6 +20,10 @@ from .common import (
     interpolate_expression,
     parse_expression,
     sample_scalar_on_grid,
+    _sample_scalar_grid,
+    _mms_local_dict,
+    _mms_coords,
+    _laplacian_sym,
 )
 
 
@@ -32,12 +36,18 @@ class ConvectionDiffusionSolver:
         
         msh = create_mesh(case_spec["domain"], case_spec["mesh"])
         V = create_scalar_space(msh, case_spec["fem"]["family"], case_spec["fem"]["degree"])
+        dim = msh.geometry.dim
 
         pde_cfg = case_spec["pde"]
         params = pde_cfg.get("pde_params", {})
         epsilon = float(params.get("epsilon", 0.01))
-        beta = params.get("beta", [1.0, 1.0])
-        beta_vec = ufl.as_vector(beta)
+        # Support 2D beta=[bx,by] and 3D beta=[bx,by,bz]; default to dim-sized zero vector
+        beta_default = [1.0] + [0.0] * (dim - 1)
+        beta = params.get("beta", beta_default)
+        # Ensure beta has exactly `dim` components
+        if len(beta) < dim:
+            beta = list(beta) + [0.0] * (dim - len(beta))
+        beta_vec = ufl.as_vector(beta[:dim])
         source_expr = pde_cfg.get("source_term")
         time_cfg = pde_cfg.get("time")
 
@@ -48,10 +58,11 @@ class ConvectionDiffusionSolver:
             f_expr = None
 
             if "u" in manufactured:
-                sx, sy = sp.symbols("x y", real=True)
-                u_sym = sp.sympify(manufactured["u"], locals={"x": sx, "y": sy})
-                bx, by = beta
-                f_sym = -epsilon * (sp.diff(u_sym, sx, 2) + sp.diff(u_sym, sy, 2)) + bx * sp.diff(u_sym, sx) + by * sp.diff(u_sym, sy)
+                local_dict = _mms_local_dict(dim)
+                coords = _mms_coords(dim)
+                u_sym = sp.sympify(manufactured["u"], locals=local_dict)
+                conv_sym = sum(beta[i] * sp.diff(u_sym, coords[i]) for i in range(dim))
+                f_sym = -epsilon * _laplacian_sym(u_sym, coords) + conv_sym
                 f_expr = parse_expression(f_sym, x)
 
                 u_exact_expr = parse_expression(u_sym, x)
@@ -106,9 +117,7 @@ class ConvectionDiffusionSolver:
             u_h = problem.solve()
 
             grid_cfg = case_spec["output"]["grid"]
-            _, _, u_grid = sample_scalar_on_grid(
-                u_h, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-            )
+            u_grid = _sample_scalar_grid(u_h, grid_cfg)
 
             baseline_error = 0.0
             solver_info = {
@@ -119,11 +128,8 @@ class ConvectionDiffusionSolver:
                 "upwind_parameter": upwind_parameter,
             }
             if u_exact is not None:
-                _, _, u_exact_grid = sample_scalar_on_grid(
-                    u_exact, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-                )
+                u_exact_grid = _sample_scalar_grid(u_exact, grid_cfg)
                 baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
-                # Use exact grid as reference for evaluation alignment.
                 u_grid = u_exact_grid
             else:
                 ref_cfg = case_spec.get("reference_config", {})
@@ -157,9 +163,7 @@ class ConvectionDiffusionSolver:
                     petsc_options_prefix="oracle_convdiff_ref_",
                 )
                 ref_u_h = ref_problem.solve()
-                _, _, ref_grid = sample_scalar_on_grid(
-                    ref_u_h, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-                )
+                ref_grid = _sample_scalar_grid(ref_u_h, grid_cfg)
                 baseline_error = compute_rel_L2_grid(u_grid, ref_grid)
                 u_grid = ref_grid
                 solver_info["reference_resolution"] = ref_mesh_spec.get("resolution")
@@ -185,11 +189,13 @@ class ConvectionDiffusionSolver:
         u_exact_expr = None
         f_expr = None
         if "u" in manufactured:
-            sx, sy, st = sp.symbols("x y t", real=True)
-            u_sym = sp.sympify(manufactured["u"], locals={"x": sx, "y": sy, "t": st})
+            local_dict = _mms_local_dict(dim, with_t=True)
+            coords = _mms_coords(dim)
+            st = local_dict["t"]
+            u_sym = sp.sympify(manufactured["u"], locals=local_dict)
             u_t = sp.diff(u_sym, st)
-            bx, by = beta
-            f_sym = u_t - epsilon * (sp.diff(u_sym, sx, 2) + sp.diff(u_sym, sy, 2)) + bx * sp.diff(u_sym, sx) + by * sp.diff(u_sym, sy)
+            conv_sym = sum(beta[i] * sp.diff(u_sym, coords[i]) for i in range(dim))
+            f_sym = u_t - epsilon * _laplacian_sym(u_sym, coords) + conv_sym
             u_exact_expr = u_sym
             f_expr = f_sym
         elif source_expr is not None:
@@ -266,9 +272,7 @@ class ConvectionDiffusionSolver:
             u_prev.x.array[:] = u_new.x.array
 
         grid_cfg = case_spec["output"]["grid"]
-        _, _, u_grid = sample_scalar_on_grid(
-            u_prev, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-        )
+        u_grid = _sample_scalar_grid(u_prev, grid_cfg)
 
         baseline_error = 0.0
         solver_info = {
@@ -284,9 +288,7 @@ class ConvectionDiffusionSolver:
             u_exact = fem.Function(V)
             u_exact_expr_t = parse_expression(u_exact_expr, x, t=t)
             interpolate_expression(u_exact, u_exact_expr_t)
-            _, _, u_exact_grid = sample_scalar_on_grid(
-                u_exact, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-            )
+            u_exact_grid = _sample_scalar_grid(u_exact, grid_cfg)
             baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
             u_grid = u_exact_grid
         else:
@@ -362,9 +364,7 @@ class ConvectionDiffusionSolver:
                 ref_u_new = ref_problem.solve()
                 ref_u_prev.x.array[:] = ref_u_new.x.array
 
-            _, _, ref_grid = sample_scalar_on_grid(
-                ref_u_prev, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-            )
+            ref_grid = _sample_scalar_grid(ref_u_prev, grid_cfg)
             baseline_error = compute_rel_L2_grid(u_grid, ref_grid)
             u_grid = ref_grid
             solver_info["reference_resolution"] = ref_mesh_spec.get("resolution")

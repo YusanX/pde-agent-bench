@@ -31,15 +31,28 @@ class FiredrakeHeatSolver:
         msh = create_mesh(case_spec["domain"], case_spec["mesh"])
         V = create_scalar_space(msh, case_spec["fem"]["family"], case_spec["fem"]["degree"])
         x = SpatialCoordinate(msh)
+        dim = msh.geometric_dimension()
 
         pde_cfg = case_spec["pde"]
         coeffs = pde_cfg.get("coefficients", {})
         kappa_spec = coeffs.get("kappa", {"type": "constant", "value": 1.0})
+
+        def _mms_symbols(with_time: bool = False):
+            sx, sy, sz, st = sp.symbols("x y z t", real=True)
+            locals_dict = {"x": sx, "y": sy, "pi": sp.pi}
+            coords = [sx, sy]
+            if dim >= 3:
+                locals_dict["z"] = sz
+                coords.append(sz)
+            if with_time:
+                locals_dict["t"] = st
+            return locals_dict, tuple(coords), st
+
         if kappa_spec["type"] == "constant":
             kappa = Constant(float(kappa_spec["value"]))
         else:
-            sx, sy = sp.symbols("x y", real=True)
-            kappa_sym = sp.sympify(kappa_spec["expr"], locals={"x": sx, "y": sy, "pi": sp.pi})
+            local_dict, _, _ = _mms_symbols()
+            kappa_sym = sp.sympify(kappa_spec["expr"], locals=local_dict)
             kappa_fn = Function(V)
             kappa_fn.interpolate(parse_expression(kappa_sym, x))
             kappa = kappa_fn
@@ -58,21 +71,18 @@ class FiredrakeHeatSolver:
         f_sym = None
 
         if "u" in manufactured:
-            sx, sy, st = sp.symbols("x y t", real=True)
-            u_sym = sp.sympify(manufactured["u"], locals={"x": sx, "y": sy, "t": st})
+            local_dict, coords, st = _mms_symbols(with_time=True)
+            u_sym = sp.sympify(manufactured["u"], locals=local_dict)
             u_t = sp.diff(u_sym, st)
             if kappa_spec["type"] == "expr":
-                ks = sp.sympify(kappa_spec["expr"], locals={"x": sx, "y": sy, "pi": sp.pi})
+                ks = sp.sympify(kappa_spec["expr"], locals=local_dict)
             else:
                 ks = sp.sympify(kappa_spec.get("value", 1.0))
-            f_sym = u_t - (
-                sp.diff(ks * sp.diff(u_sym, sx), sx)
-                + sp.diff(ks * sp.diff(u_sym, sy), sy)
-            )
+            f_sym = u_t - sum(sp.diff(ks * sp.diff(u_sym, c), c) for c in coords)
             u_exact_sym = u_sym
         elif source_expr is not None:
-            sx, sy = sp.symbols("x y", real=True)
-            f_sym = sp.sympify(source_expr, locals={"x": sx, "y": sy, "pi": sp.pi})
+            local_dict, _, _ = _mms_symbols()
+            f_sym = sp.sympify(source_expr, locals=local_dict)
 
         # Initial condition
         u_prev = Function(V)
@@ -112,15 +122,14 @@ class FiredrakeHeatSolver:
             u_prev.assign(uh)
 
         grid_cfg = case_spec["output"]["grid"]
-        _, _, u_grid = sample_scalar_on_grid(u_prev, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"])
+        sample_args = (grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"], grid_cfg.get("nz"))
+        *_, u_grid = sample_scalar_on_grid(u_prev, *sample_args)
 
         baseline_error = 0.0
         if u_exact_sym is not None:
             u_exact_fn = Function(V)
             u_exact_fn.interpolate(parse_expression(u_exact_sym, x, t=t_cur))
-            _, _, u_exact_grid = sample_scalar_on_grid(
-                u_exact_fn, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-            )
+            *_, u_exact_grid = sample_scalar_on_grid(u_exact_fn, *sample_args)
             baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
             u_grid = u_exact_grid
         else:
@@ -169,7 +178,7 @@ class FiredrakeHeatSolver:
                 solve(ref_a == ref_L, ref_uh, bcs=ref_bcs, solver_parameters=ref_sp)
                 ref_u_prev.assign(ref_uh)
 
-            _, _, ref_grid = sample_scalar_on_grid(ref_u_prev, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"])
+            *_, ref_grid = sample_scalar_on_grid(ref_u_prev, *sample_args)
             baseline_error = compute_rel_L2_grid(u_grid, ref_grid)
             u_grid = ref_grid
 

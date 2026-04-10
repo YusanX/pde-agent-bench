@@ -2,13 +2,14 @@
 /**
  * grid_writer.h
  *
- * Samples a scalar deal.II FE solution on a uniform 2-D grid and writes:
+ * Samples a scalar deal.II FE solution on a uniform 2-D or 3-D grid and writes:
  *
- *   {outdir}/solution_grid.bin   – raw float64, C-order [ny, nx]
- *   {outdir}/meta.json           – nx, ny, num_dofs, baseline_time, …
+ *   {outdir}/solution_grid.bin   – raw float64, C-order [ny, nx] or [nz, ny, nx]
+ *   {outdir}/meta.json           – nx, ny, [nz], num_dofs, baseline_time, …
  *
  * Python reads the binary as:
  *   grid = np.fromfile("solution_grid.bin", dtype=np.float64).reshape(ny, nx)
+ *   # or reshape(nz, ny, nx) for 3-D
  *
  * Grid ordering convention (matches Firedrake oracle and DOLFINx oracle):
  *   grid[j, i] = u( x_lin[i], y_lin[j] )
@@ -20,11 +21,12 @@
  * provided that writes |u| (magnitude) in the same format.
  */
 
-#include <array>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include <deal.II/base/point.h>
@@ -37,24 +39,56 @@
 namespace oracle_util {
 
 // ---------------------------------------------------------------------------
-// Internal: build uniform (ny × nx) grid of Point<2>
-// Order: row-major with j (y) outer, i (x) inner → grid[j*nx + i]
+// Internal: build a uniform evaluation grid.
+// 2-D order:           j (y) outer, i (x) inner      → grid[j*nx + i]
+// 3-D order: k (z) outer, j (y) middle, i (x) inner  → grid[(k*ny + j)*nx + i]
 // ---------------------------------------------------------------------------
-inline std::vector<dealii::Point<2>>
-make_grid_points(const std::array<double, 4>& bbox, int nx, int ny) {
-  const double xmin = bbox[0], xmax = bbox[1];
-  const double ymin = bbox[2], ymax = bbox[3];
+template <int dim>
+std::vector<dealii::Point<dim>>
+make_grid_points(const std::vector<double>& bbox, int nx, int ny, int nz = 0) {
+  static_assert(dim == 2 || dim == 3, "Only 2-D and 3-D grids are supported");
 
-  std::vector<dealii::Point<2>> pts(static_cast<std::size_t>(nx) * ny);
-  std::size_t idx = 0;
-  for (int j = 0; j < ny; ++j) {
-    double y = (ny > 1) ? ymin + j * (ymax - ymin) / (ny - 1) : 0.5 * (ymin + ymax);
-    for (int i = 0; i < nx; ++i) {
-      double x = (nx > 1) ? xmin + i * (xmax - xmin) / (nx - 1) : 0.5 * (xmin + xmax);
-      pts[idx++] = dealii::Point<2>(x, y);
+  if constexpr (dim == 2) {
+    if (bbox.size() != 4)
+      throw std::runtime_error("2-D grid writer expects bbox size 4");
+
+    const double xmin = bbox[0], xmax = bbox[1];
+    const double ymin = bbox[2], ymax = bbox[3];
+
+    std::vector<dealii::Point<dim>> pts(static_cast<std::size_t>(nx) * ny);
+    std::size_t idx = 0;
+    for (int j = 0; j < ny; ++j) {
+      const double y = (ny > 1) ? ymin + j * (ymax - ymin) / (ny - 1) : 0.5 * (ymin + ymax);
+      for (int i = 0; i < nx; ++i) {
+        const double x = (nx > 1) ? xmin + i * (xmax - xmin) / (nx - 1) : 0.5 * (xmin + xmax);
+        pts[idx++] = dealii::Point<dim>(x, y);
+      }
     }
+    return pts;
+  } else {
+    if (bbox.size() != 6)
+      throw std::runtime_error("3-D grid writer expects bbox size 6");
+    if (nz <= 0)
+      throw std::runtime_error("3-D grid writer expects nz > 0");
+
+    const double xmin = bbox[0], xmax = bbox[1];
+    const double ymin = bbox[2], ymax = bbox[3];
+    const double zmin = bbox[4], zmax = bbox[5];
+
+    std::vector<dealii::Point<dim>> pts(static_cast<std::size_t>(nx) * ny * nz);
+    std::size_t idx = 0;
+    for (int k = 0; k < nz; ++k) {
+      const double z = (nz > 1) ? zmin + k * (zmax - zmin) / (nz - 1) : 0.5 * (zmin + zmax);
+      for (int j = 0; j < ny; ++j) {
+        const double y = (ny > 1) ? ymin + j * (ymax - ymin) / (ny - 1) : 0.5 * (ymin + ymax);
+        for (int i = 0; i < nx; ++i) {
+          const double x = (nx > 1) ? xmin + i * (xmax - xmin) / (nx - 1) : 0.5 * (xmin + xmax);
+          pts[idx++] = dealii::Point<dim>(x, y, z);
+        }
+      }
+    }
+    return pts;
   }
-  return pts;
 }
 
 // ---------------------------------------------------------------------------
@@ -63,6 +97,7 @@ make_grid_points(const std::array<double, 4>& bbox, int nx, int ny) {
 inline void write_meta(const std::string&     outdir,
                        int                    nx,
                        int                    ny,
+                       int                    nz,
                        std::size_t            num_dofs,
                        double                 baseline_time,
                        const std::string&     ksp_type = "",
@@ -71,6 +106,8 @@ inline void write_meta(const std::string&     outdir,
   nlohmann::json meta;
   meta["nx"]            = nx;
   meta["ny"]            = ny;
+  if (nz > 0)
+    meta["nz"]          = nz;
   meta["num_dofs"]      = num_dofs;
   meta["baseline_time"] = baseline_time;
   meta["ksp_type"]      = ksp_type;
@@ -101,15 +138,16 @@ inline void write_binary(const std::string&         outdir,
 template <int dim = 2>
 void write_scalar_grid(const dealii::DoFHandler<dim>&  dof_handler,
                        const dealii::Vector<double>&   solution,
-                       const std::array<double, 4>&    bbox,
+                       const std::vector<double>&      bbox,
                        int                             nx,
                        int                             ny,
+                       int                             nz,
                        const std::string&              outdir,
                        double                          baseline_time,
                        const std::string&              ksp_type = "",
                        const std::string&              pc_type  = "",
                        double                          rtol     = 0.0) {
-  auto pts = make_grid_points(bbox, nx, ny);
+  auto pts = make_grid_points<dim>(bbox, nx, ny, nz);
   const std::size_t n_pts = pts.size();
 
   // FEFieldFunction wraps solution for arbitrary-point evaluation
@@ -119,8 +157,23 @@ void write_scalar_grid(const dealii::DoFHandler<dim>&  dof_handler,
   field_func.value_list(pts, values);
 
   write_binary(outdir, values);
-  write_meta(outdir, nx, ny, dof_handler.n_dofs(),
+  write_meta(outdir, nx, ny, dim == 3 ? nz : 0, dof_handler.n_dofs(),
              baseline_time, ksp_type, pc_type, rtol);
+}
+
+template <int dim = 2>
+void write_scalar_grid(const dealii::DoFHandler<dim>&  dof_handler,
+                       const dealii::Vector<double>&   solution,
+                       const std::vector<double>&      bbox,
+                       int                             nx,
+                       int                             ny,
+                       const std::string&              outdir,
+                       double                          baseline_time,
+                       const std::string&              ksp_type = "",
+                       const std::string&              pc_type  = "",
+                       double                          rtol     = 0.0) {
+  write_scalar_grid<dim>(
+      dof_handler, solution, bbox, nx, ny, 0, outdir, baseline_time, ksp_type, pc_type, rtol);
 }
 
 // ---------------------------------------------------------------------------
@@ -130,15 +183,16 @@ void write_scalar_grid(const dealii::DoFHandler<dim>&  dof_handler,
 template <int dim = 2>
 void write_vector_magnitude_grid(const dealii::DoFHandler<dim>&  dof_handler,
                                  const dealii::Vector<double>&   solution,
-                                 const std::array<double, 4>&    bbox,
+                                 const std::vector<double>&      bbox,
                                  int                             nx,
                                  int                             ny,
+                                 int                             nz,
                                  const std::string&              outdir,
                                  double                          baseline_time,
                                  const std::string&              ksp_type = "",
                                  const std::string&              pc_type  = "",
                                  double                          rtol     = 0.0) {
-  auto pts = make_grid_points(bbox, nx, ny);
+  auto pts = make_grid_points<dim>(bbox, nx, ny, nz);
   const std::size_t n_pts = pts.size();
 
   dealii::Functions::FEFieldFunction<dim> field_func(dof_handler, solution);
@@ -160,8 +214,23 @@ void write_vector_magnitude_grid(const dealii::DoFHandler<dim>&  dof_handler,
   }
 
   write_binary(outdir, magnitudes);
-  write_meta(outdir, nx, ny, dof_handler.n_dofs(),
+  write_meta(outdir, nx, ny, dim == 3 ? nz : 0, dof_handler.n_dofs(),
              baseline_time, ksp_type, pc_type, rtol);
+}
+
+template <int dim = 2>
+void write_vector_magnitude_grid(const dealii::DoFHandler<dim>&  dof_handler,
+                                 const dealii::Vector<double>&   solution,
+                                 const std::vector<double>&      bbox,
+                                 int                             nx,
+                                 int                             ny,
+                                 const std::string&              outdir,
+                                 double                          baseline_time,
+                                 const std::string&              ksp_type = "",
+                                 const std::string&              pc_type  = "",
+                                 double                          rtol     = 0.0) {
+  write_vector_magnitude_grid<dim>(
+      dof_handler, solution, bbox, nx, ny, 0, outdir, baseline_time, ksp_type, pc_type, rtol);
 }
 
 }  // namespace oracle_util

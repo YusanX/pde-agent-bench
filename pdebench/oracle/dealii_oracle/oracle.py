@@ -41,19 +41,32 @@ def _sample_exact_scalar_grid(
     t_value: Optional[float] = None,
 ) -> np.ndarray:
     """Sample a scalar sympy expression on the evaluator grid."""
-    sx, sy, st = sp.symbols("x y t", real=True)
-    expr = sp.sympify(str(expr_str), locals={"x": sx, "y": sy, "t": st, "pi": sp.pi})
+    sx, sy, sz, st = sp.symbols("x y z t", real=True)
+    expr = sp.sympify(str(expr_str), locals={"x": sx, "y": sy, "z": sz, "t": st, "pi": sp.pi})
     if t_value is not None:
         expr = expr.subs(st, float(t_value))
-    fn = sp.lambdify((sx, sy), expr, modules="numpy")
 
     bbox = grid_cfg["bbox"]
     nx = int(grid_cfg["nx"])
     ny = int(grid_cfg["ny"])
+    is_3d = len(bbox) == 6 and "nz" in grid_cfg
+
+    if is_3d:
+        nz = int(grid_cfg["nz"])
+        fn = sp.lambdify((sx, sy, sz), expr, modules="numpy")
+        x_lin = np.linspace(bbox[0], bbox[1], nx)
+        y_lin = np.linspace(bbox[2], bbox[3], ny)
+        z_lin = np.linspace(bbox[4], bbox[5], nz)
+        zz, yy, xx = np.meshgrid(z_lin, y_lin, x_lin, indexing="ij")
+        values = np.asarray(fn(xx, yy, zz), dtype=np.float64)
+        if values.shape == ():
+            values = np.full((nz, ny, nx), float(values), dtype=np.float64)
+        return values.reshape(nz, ny, nx)
+
+    fn = sp.lambdify((sx, sy), expr, modules="numpy")
     x_lin = np.linspace(bbox[0], bbox[1], nx)
     y_lin = np.linspace(bbox[2], bbox[3], ny)
     xx, yy = np.meshgrid(x_lin, y_lin, indexing="xy")
-
     values = np.asarray(fn(xx, yy), dtype=np.float64)
     if values.shape == ():
         values = np.full((ny, nx), float(values), dtype=np.float64)
@@ -70,24 +83,42 @@ def _sample_exact_vector_magnitude_grid(
     Sample vector field components and return their L2 magnitude grid.
     Matches write_vector_magnitude_grid in grid_writer.h (stokes/navier_stokes/linear_elasticity).
     """
-    sx, sy, st = sp.symbols("x y t", real=True)
+    sx, sy, sz, st = sp.symbols("x y z t", real=True)
     bbox = grid_cfg["bbox"]
     nx = int(grid_cfg["nx"])
     ny = int(grid_cfg["ny"])
-    x_lin = np.linspace(bbox[0], bbox[1], nx)
-    y_lin = np.linspace(bbox[2], bbox[3], ny)
-    xx, yy = np.meshgrid(x_lin, y_lin, indexing="xy")
+    is_3d = len(bbox) == 6 and "nz" in grid_cfg
 
-    mag_sq = np.zeros((ny, nx), dtype=np.float64)
+    if is_3d:
+        nz = int(grid_cfg["nz"])
+        x_lin = np.linspace(bbox[0], bbox[1], nx)
+        y_lin = np.linspace(bbox[2], bbox[3], ny)
+        z_lin = np.linspace(bbox[4], bbox[5], nz)
+        zz, yy, xx = np.meshgrid(z_lin, y_lin, x_lin, indexing="ij")
+        mag_sq = np.zeros((nz, ny, nx), dtype=np.float64)
+    else:
+        x_lin = np.linspace(bbox[0], bbox[1], nx)
+        y_lin = np.linspace(bbox[2], bbox[3], ny)
+        xx, yy = np.meshgrid(x_lin, y_lin, indexing="xy")
+        mag_sq = np.zeros((ny, nx), dtype=np.float64)
+
     for expr_str in expr_list:
-        expr = sp.sympify(str(expr_str), locals={"x": sx, "y": sy, "t": st, "pi": sp.pi})
+        expr = sp.sympify(str(expr_str), locals={"x": sx, "y": sy, "z": sz, "t": st, "pi": sp.pi})
         if t_value is not None:
             expr = expr.subs(st, float(t_value))
-        fn = sp.lambdify((sx, sy), expr, modules="numpy")
-        comp = np.asarray(fn(xx, yy), dtype=np.float64)
-        if comp.shape == ():
-            comp = np.full((ny, nx), float(comp), dtype=np.float64)
-        mag_sq += comp.reshape(ny, nx) ** 2
+
+        if is_3d:
+            fn = sp.lambdify((sx, sy, sz), expr, modules="numpy")
+            comp = np.asarray(fn(xx, yy, zz), dtype=np.float64)
+            if comp.shape == ():
+                comp = np.full((nz, ny, nx), float(comp), dtype=np.float64)
+            mag_sq += comp.reshape(nz, ny, nx) ** 2
+        else:
+            fn = sp.lambdify((sx, sy), expr, modules="numpy")
+            comp = np.asarray(fn(xx, yy), dtype=np.float64)
+            if comp.shape == ():
+                comp = np.full((ny, nx), float(comp), dtype=np.float64)
+            mag_sq += comp.reshape(ny, nx) ** 2
 
     return np.sqrt(mag_sq)
 
@@ -440,6 +471,8 @@ class DealIIOracleSolver:
 
         # 1. Inject _computed_* expression fields for C++
         enriched = preprocess_case_spec(case_spec)
+        grid_cfg = enriched.get("output", {}).get("grid", {})
+        is_3d = len(grid_cfg.get("bbox", [])) == 6 and "nz" in grid_cfg
 
         # 2. Compile oracle binaries if not yet done
         self._ensure_built(pde_type)
@@ -460,6 +493,22 @@ class DealIIOracleSolver:
                     **os_cfg,
                     "ksp_type": "preonly",
                     "pc_type":  "lu",
+                }
+
+        # 2c. In 3-D Helmholtz, direct LU factorizations can be prohibitively
+        # memory-hungry inside the dealii Docker image and may be SIGKILLed
+        # even for meshes that are otherwise fine with Krylov solves.
+        # Prefer a robust iterative fallback instead of crashing the oracle.
+        if pde_type == "helmholtz" and is_3d:
+            os_cfg = enriched.get("oracle_solver", {})
+            _ksp = os_cfg.get("ksp_type", "gmres")
+            _pc  = os_cfg.get("pc_type", "ilu")
+            if _ksp in ("preonly",) or _pc in ("lu", "mumps", "direct"):
+                enriched = copy.deepcopy(enriched)
+                enriched["oracle_solver"] = {
+                    **os_cfg,
+                    "ksp_type": "gmres",
+                    "pc_type": "ilu",
                 }
 
         # 3. Run C++ binary

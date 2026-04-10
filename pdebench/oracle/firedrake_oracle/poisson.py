@@ -16,7 +16,7 @@ from .common import (
     OracleResult, compute_rel_L2_grid,
     create_mesh, create_scalar_space,
     parse_expression,
-    build_scalar_bc, build_scalar_bc_from_function,
+    build_scalar_bc,
     sample_scalar_on_grid,
     _scalar_solver_params,
 )
@@ -31,17 +31,27 @@ class FiredrakePoissonSolver:
         msh = create_mesh(case_spec["domain"], case_spec["mesh"])
         V = create_scalar_space(msh, case_spec["fem"]["family"], case_spec["fem"]["degree"])
         x = SpatialCoordinate(msh)
+        dim = msh.geometric_dimension()
 
         pde_cfg = case_spec["pde"]
         coeffs = pde_cfg.get("coefficients", {})
         kappa_spec = coeffs.get("kappa", {"type": "constant", "value": 1.0})
 
+        def _mms_symbols():
+            sx, sy, sz = sp.symbols("x y z", real=True)
+            locals_dict = {"x": sx, "y": sy, "pi": sp.pi}
+            coords = [sx, sy]
+            if dim >= 3:
+                locals_dict["z"] = sz
+                coords.append(sz)
+            return locals_dict, tuple(coords)
+
         # Build kappa field
         if kappa_spec["type"] == "constant":
             kappa = Constant(float(kappa_spec["value"]))
         else:
-            sx, sy = sp.symbols("x y", real=True)
-            kappa_sym = sp.sympify(kappa_spec["expr"], locals={"x": sx, "y": sy, "pi": sp.pi})
+            local_dict, _ = _mms_symbols()
+            kappa_sym = sp.sympify(kappa_spec["expr"], locals=local_dict)
             kappa_ufl = parse_expression(kappa_sym, x)
             kappa_fn = Function(V)
             kappa_fn.interpolate(kappa_ufl)
@@ -53,16 +63,13 @@ class FiredrakePoissonSolver:
         f_ufl = None
 
         if "u" in manufactured:
-            sx, sy = sp.symbols("x y", real=True)
-            u_sym = sp.sympify(manufactured["u"], locals={"x": sx, "y": sy, "pi": sp.pi})
+            local_dict, coords = _mms_symbols()
+            u_sym = sp.sympify(manufactured["u"], locals=local_dict)
             if kappa_spec["type"] == "expr":
-                kappa_sym = sp.sympify(kappa_spec["expr"], locals={"x": sx, "y": sy, "pi": sp.pi})
+                kappa_sym = sp.sympify(kappa_spec["expr"], locals=local_dict)
             else:
                 kappa_sym = sp.sympify(kappa_spec.get("value", 1.0))
-            f_sym = -(
-                sp.diff(kappa_sym * sp.diff(u_sym, sx), sx)
-                + sp.diff(kappa_sym * sp.diff(u_sym, sy), sy)
-            )
+            f_sym = -sum(sp.diff(kappa_sym * sp.diff(u_sym, c), c) for c in coords)
             f_ufl = parse_expression(f_sym, x)
             u_exact_fn = Function(V)
             u_exact_fn.interpolate(parse_expression(u_sym, x))
@@ -91,13 +98,12 @@ class FiredrakePoissonSolver:
         solve(a == L, uh, bcs=bcs, solver_parameters=sp_dict)
 
         grid_cfg = case_spec["output"]["grid"]
-        _, _, u_grid = sample_scalar_on_grid(uh, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"])
+        sample_args = (grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"], grid_cfg.get("nz"))
+        *_, u_grid = sample_scalar_on_grid(uh, *sample_args)
 
         baseline_error = 0.0
         if u_exact_fn is not None:
-            _, _, u_exact_grid = sample_scalar_on_grid(
-                u_exact_fn, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-            )
+            *_, u_exact_grid = sample_scalar_on_grid(u_exact_fn, *sample_args)
             baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
             u_grid = u_exact_grid
         else:
@@ -136,9 +142,7 @@ class FiredrakePoissonSolver:
             ref_sp["ksp_rtol"] = ref_solver.get("rtol", 1e-12)
             solve(ref_a == ref_L, ref_uh, bcs=ref_bcs, solver_parameters=ref_sp)
 
-            _, _, ref_grid = sample_scalar_on_grid(
-                ref_uh, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-            )
+            *_, ref_grid = sample_scalar_on_grid(ref_uh, *sample_args)
             baseline_error = compute_rel_L2_grid(u_grid, ref_grid)
             u_grid = ref_grid
 

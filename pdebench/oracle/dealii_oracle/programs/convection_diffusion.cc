@@ -49,15 +49,31 @@
 #include "grid_writer.h"
 
 using namespace dealii;
-namespace { static const std::map<std::string, double> MU_CONST = {{"pi", M_PI}}; }
+namespace {
+static const std::map<std::string, double> MU_CONST = {{"pi", M_PI}};
 
+template <int dim>
+void initialize_parser(FunctionParser<dim>& parser,
+                       const std::string& expr,
+                       const bool time_dependent = false) {
+  if (time_dependent)
+    parser.initialize(dim == 2 ? "x,y,t" : "x,y,z,t", expr, MU_CONST, true);
+  else
+    parser.initialize(dim == 2 ? "x,y" : "x,y,z", expr, MU_CONST, false);
+}
+}  // namespace
+
+template <int dim>
 class ConvectionDiffusionOracle {
  public:
   explicit ConvectionDiffusionOracle(const CaseSpec& s)
       : spec_(s), fe_(s.fem.degree), dh_(tria_) {
     epsilon_ = std::stod(spec_.pde.value("_computed_epsilon", "0.01"));
-    beta_x_  = std::stod(spec_.pde.value("_computed_beta_x",  "1.0"));
-    beta_y_  = std::stod(spec_.pde.value("_computed_beta_y",  "0.0"));
+    beta_[0] = std::stod(spec_.pde.value("_computed_beta_x",  "1.0"));
+    if constexpr (dim >= 2)
+      beta_[1] = std::stod(spec_.pde.value("_computed_beta_y",  "0.0"));
+    if constexpr (dim >= 3)
+      beta_[2] = std::stod(spec_.pde.value("_computed_beta_z",  "0.0"));
 
     // Stabilization: oracle_solver overrides pde_params
     stabilization_ = spec_.oracle_solver.stabilization;
@@ -81,8 +97,8 @@ class ConvectionDiffusionOracle {
     if (transient_) time_march();
     else            solve_steady();
     timer.stop();
-    oracle_util::write_scalar_grid(dh_, u_,
-        spec_.output_grid.bbox, spec_.output_grid.nx, spec_.output_grid.ny,
+    oracle_util::write_scalar_grid<dim>(dh_, u_,
+        spec_.output_grid.bbox, spec_.output_grid.nx, spec_.output_grid.ny, spec_.output_grid.nz,
         outdir, timer.wall_time(),
         spec_.oracle_solver.ksp_type, spec_.oracle_solver.pc_type,
         spec_.oracle_solver.rtol);
@@ -90,9 +106,9 @@ class ConvectionDiffusionOracle {
 
  private:
   const CaseSpec&            spec_;
-  Triangulation<2>           tria_;
-  FE_Q<2>                    fe_;
-  DoFHandler<2>              dh_;
+  Triangulation<dim>         tria_;
+  FE_Q<dim>                  fe_;
+  DoFHandler<dim>            dh_;
   AffineConstraints<double>  cons_;
   SparsityPattern            sp_;
   SparseMatrix<double>       K_;    // advection-diffusion stiffness
@@ -100,7 +116,8 @@ class ConvectionDiffusionOracle {
   SparseMatrix<double>       sys_;  // M + dt*K
   Vector<double>             u_, old_u_, rhs_;
 
-  double      epsilon_ = 0.01, beta_x_ = 1.0, beta_y_ = 0.0;
+  double              epsilon_ = 0.01;
+  Tensor<1, dim>      beta_;
   double      t0_ = 0.0, t_end_ = 1.0, dt_ = 0.01;
   std::string stabilization_    = "none";
   double      upwind_parameter_ = 1.0;
@@ -113,12 +130,12 @@ class ConvectionDiffusionOracle {
   void setup_system() {
     dh_.distribute_dofs(fe_);
     cons_.clear();
-    FunctionParser<2> bc(1);
+    FunctionParser<dim> bc(1);
     if (transient_) {
-      bc.initialize("x,y,t", spec_.computed_bc(), MU_CONST, true);
+      initialize_parser<dim>(bc, spec_.computed_bc(), true);
       bc.set_time(t0_);
     } else {
-      bc.initialize("x,y", spec_.computed_bc(), MU_CONST, false);
+      initialize_parser<dim>(bc, spec_.computed_bc(), false);
     }
     VectorTools::interpolate_boundary_values(dh_, 0, bc, cons_);
     cons_.close();
@@ -137,7 +154,7 @@ class ConvectionDiffusionOracle {
   // Matches dolfinx formula: tau = upwind_parameter * h / (2 * beta_norm)
   double supg_tau(double h_cell) const {
     if (stabilization_ != "supg") return 0.0;
-    const double beta_norm = std::sqrt(beta_x_*beta_x_ + beta_y_*beta_y_);
+    const double beta_norm = beta_.norm();
     if (beta_norm < 1e-14) return 0.0;
     return upwind_parameter_ * h_cell / (2.0 * beta_norm);
   }
@@ -146,23 +163,23 @@ class ConvectionDiffusionOracle {
     K_ = 0;
     if (transient_) M_ = 0;
 
-    FunctionParser<2> src(1);
+    FunctionParser<dim> src(1);
     const bool has_t = transient_;
     if (has_t)
-      src.initialize("x,y,t", spec_.computed_source(), MU_CONST, true);
+      initialize_parser<dim>(src, spec_.computed_source(), true);
     else
-      src.initialize("x,y",   spec_.computed_source(), MU_CONST, false);
+      initialize_parser<dim>(src, spec_.computed_source(), false);
     if (has_t) src.set_time(t);
 
-    // h_cell: diameter of the square reference cell (side = 1/resolution)
+    // h_cell: diameter of the reference cell on a unit hypercube mesh
     const double dx = 1.0 / spec_.mesh.resolution;
-    const double tau = supg_tau(dx * std::sqrt(2.0));
+    const double tau = supg_tau(dx * std::sqrt(static_cast<double>(dim)));
 
     // update_hessians needed for the full SUPG residual term (−ε τ (β·∇v) Δu)
     // For Q1 elements the Laplacian of shape functions is zero, so it is a
     // no-op for degree=1.  For Q2+ elements it provides the consistency term.
-    QGauss<2>   quad(fe_.degree + 1);
-    FEValues<2> fev(fe_, quad,
+    QGauss<dim>   quad(fe_.degree + 1);
+    FEValues<dim> fev(fe_, quad,
                     update_values | update_gradients | update_hessians |
                     update_JxW_values | update_quadrature_points);
 
@@ -178,16 +195,20 @@ class ConvectionDiffusionOracle {
         const double JxW = fev.JxW(q);
         for (unsigned int i = 0; i < n; ++i) {
           // SUPG test function modifier: v + τ β·∇v
-          const double supg_i = tau * (beta_x_ * fev.shape_grad(i,q)[0]
-                                     + beta_y_ * fev.shape_grad(i,q)[1]);
+          double beta_dot_grad_i = 0.0;
+          for (unsigned int d = 0; d < dim; ++d)
+            beta_dot_grad_i += beta_[d] * fev.shape_grad(i,q)[d];
+          const double supg_i = tau * beta_dot_grad_i;
           const double vi     = fev.shape_value(i,q) + supg_i;
 
           for (unsigned int j = 0; j < n; ++j) {
-            const double conv_j = beta_x_ * fev.shape_grad(j,q)[0]
-                                + beta_y_ * fev.shape_grad(j,q)[1];
+            double conv_j = 0.0;
+            for (unsigned int d = 0; d < dim; ++d)
+              conv_j += beta_[d] * fev.shape_grad(j,q)[d];
             // Laplacian of shape function j (zero for Q1, nonzero for Q2+)
-            const double lap_j  = fev.shape_hessian(j,q)[0][0]
-                                + fev.shape_hessian(j,q)[1][1];
+            double lap_j = 0.0;
+            for (unsigned int d = 0; d < dim; ++d)
+              lap_j += fev.shape_hessian(j,q)[d][d];
 
             // Full residual-based SUPG bilinear form:
             //   ε(∇u,∇v) + (β·∇u)v + τ(β·∇v)(β·∇u − ε Δu)
@@ -295,8 +316,8 @@ class ConvectionDiffusionOracle {
   void time_march() {
     // Set IC
     const std::string ic = spec_.pde.value("_computed_ic", "0.0");
-    FunctionParser<2> ic_func(1);
-    ic_func.initialize("x,y", ic, MU_CONST, false);
+    FunctionParser<dim> ic_func(1);
+    initialize_parser<dim>(ic_func, ic, false);
     VectorTools::interpolate(dh_, ic_func, u_);
     old_u_ = u_;
 
@@ -323,8 +344,8 @@ class ConvectionDiffusionOracle {
       // Apply BC at time t
       AffineConstraints<double> cons_t;
       cons_t.clear();
-      FunctionParser<2> bc_t(1);
-      bc_t.initialize("x,y,t", spec_.computed_bc(), MU_CONST, true);
+      FunctionParser<dim> bc_t(1);
+      initialize_parser<dim>(bc_t, spec_.computed_bc(), true);
       bc_t.set_time(t);
       VectorTools::interpolate_boundary_values(dh_, 0, bc_t, cons_t);
       cons_t.close();
@@ -344,7 +365,13 @@ int main(int argc, char* argv[]) {
     return 1;
   }
   Utilities::MPI::MPI_InitFinalize mpi_init(argc, argv, 1);
-  try { ConvectionDiffusionOracle(read_case_spec(argv[1])).run(argv[2]); }
+  try {
+    const CaseSpec spec = read_case_spec(argv[1]);
+    if (spec.output_grid.is_3d() || spec.domain.type == "unit_cube")
+      ConvectionDiffusionOracle<3>(spec).run(argv[2]);
+    else
+      ConvectionDiffusionOracle<2>(spec).run(argv[2]);
+  }
   catch (const std::exception& e) { std::cerr << "ERROR: " << e.what() << "\n"; return 1; }
   return 0;
 }

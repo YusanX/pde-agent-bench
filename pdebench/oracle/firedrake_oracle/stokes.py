@@ -29,6 +29,8 @@ _NAMED_BOUNDARY_MAP = {
     "x1": 2, "xmax": 2,
     "y1": 3, "ymax": 3,
     "x0": 4, "xmin": 4,
+    "z0": 5, "zmin": 5,
+    "z1": 6, "zmax": 6,
 }
 
 
@@ -42,7 +44,7 @@ def _to_firedrake_boundary(on: str):
     try:
         return int(on)
     except (ValueError, TypeError):
-        raise ValueError(f"Unknown boundary label '{on}' (expected x0/x1/y0/y1 or integer)")
+        raise ValueError(f"Unknown boundary label '{on}' (expected x0/x1/y0/y1/z0/z1 or integer)")
 
 
 def _build_velocity_bcs(W, u_exact_fn, bc_cfg, x, dim):
@@ -128,16 +130,8 @@ def _build_stokes_solver_parameters(
     default_max_it: int | None = None,
 ) -> Dict[str, Any]:
     """Build Firedrake PETSc options for linear Stokes solves."""
-    requested_pc = solver_params.get("pc_type", default_pc)
-    needs_mumps = solver_params.get("pc_factor_mat_solver_type", "") == "mumps"
-
-    # DOLFINx configs may request MUMPS; keep Firedrake on portable defaults.
-    if needs_mumps:
-        ksp_type = default_ksp
-        pc_type = default_pc
-    else:
-        ksp_type = solver_params.get("ksp_type", default_ksp)
-        pc_type = requested_pc
+    ksp_type = solver_params.get("ksp_type", default_ksp)
+    pc_type = solver_params.get("pc_type", default_pc)
 
     sp_dict = {
         "ksp_type": ksp_type,
@@ -146,6 +140,9 @@ def _build_stokes_solver_parameters(
     }
     if default_max_it is not None or "max_it" in solver_params:
         sp_dict["ksp_max_it"] = solver_params.get("max_it", default_max_it)
+
+    if "pc_factor_mat_solver_type" in solver_params:
+        sp_dict["pc_factor_mat_solver_type"] = solver_params["pc_factor_mat_solver_type"]
 
     if pc_type == "fieldsplit":
         sp_dict.update({
@@ -292,13 +289,12 @@ class FiredrakeStokesOracle:
         u_h, p_h = w_h.subfunctions
 
         grid_cfg = case_spec["output"]["grid"]
-        _, _, u_grid = sample_vector_magnitude_on_grid(u_h, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"])
+        sample_args = (grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"], grid_cfg.get("nz"))
+        *_, u_grid = sample_vector_magnitude_on_grid(u_h, *sample_args)
 
         baseline_error = 0.0
         if u_exact_fn is not None:
-            _, _, u_exact_grid = sample_vector_magnitude_on_grid(
-                u_exact_fn, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-            )
+            *_, u_exact_grid = sample_vector_magnitude_on_grid(u_exact_fn, *sample_args)
             baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
             u_grid = u_exact_grid
         else:
@@ -354,7 +350,7 @@ class FiredrakeStokesOracle:
             )
             ref_u_h, _ = ref_w_h.subfunctions
 
-            _, _, ref_grid = sample_vector_magnitude_on_grid(ref_u_h, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"])
+            *_, ref_grid = sample_vector_magnitude_on_grid(ref_u_h, *sample_args)
             baseline_error = compute_rel_L2_grid(u_grid, ref_grid)
             u_grid = ref_grid
 

@@ -111,7 +111,7 @@ def _build_vector_bcs(V, bc_cfg, x):
 
 
 class FiredrakeLinearElasticitySolver:
-    """2D linear elasticity oracle using Firedrake."""
+    """Linear elasticity oracle using Firedrake."""
 
     def solve(self, case_spec: Dict[str, Any]) -> OracleResult:
         t_start = time.perf_counter()
@@ -121,6 +121,7 @@ class FiredrakeLinearElasticitySolver:
         family = case_spec["fem"].get("family", "Lagrange")
         V = create_vector_space(msh, family, degree)
         x = SpatialCoordinate(msh)
+        dim = msh.geometric_dimension()
 
         pde_cfg = case_spec["pde"]
         params = pde_cfg.get("pde_params", {})
@@ -130,31 +131,38 @@ class FiredrakeLinearElasticitySolver:
             return sym(grad(u))
 
         def sigma(u):
-            return 2.0 * mu * eps(u) + lam * tr(eps(u)) * Identity(2)
+            return 2.0 * mu * eps(u) + lam * tr(eps(u)) * Identity(dim)
 
         manufactured = pde_cfg.get("manufactured_solution", {})
         source_expr = pde_cfg.get("source_term")
         u_exact_fn = None
         f_ufl = None
 
+        def _mms_symbols():
+            sx, sy, sz = sp.symbols("x y z", real=True)
+            locals_dict = {"x": sx, "y": sy, "pi": sp.pi}
+            coords = [sx, sy]
+            if dim >= 3:
+                locals_dict["z"] = sz
+                coords.append(sz)
+            return locals_dict, tuple(coords)
+
         if "u" in manufactured:
-            sx, sy = sp.symbols("x y", real=True)
-            u_sym_vec = [sp.sympify(s, locals={"x": sx, "y": sy, "pi": sp.pi})
-                         for s in manufactured["u"]]
+            local_dict, coords = _mms_symbols()
+            u_sym_vec = [sp.sympify(s, locals=local_dict) for s in manufactured["u"]]
+            if len(u_sym_vec) != dim:
+                raise ValueError(
+                    f"Linear elasticity manufactured solution expects {dim} components, "
+                    f"got {len(u_sym_vec)}"
+                )
             lam_s, mu_s = sp.sympify(lam), sp.sympify(mu)
 
-            def eps_sym(uvec):
-                return [[sp.diff(uvec[i], [sx, sy][j]) + sp.diff(uvec[j], [sx, sy][i])
-                         for j in range(2)] for i in range(2)]
-
-            e = eps_sym(u_sym_vec)
-            div_e = [(sp.diff(e[i][0], sx) + sp.diff(e[i][1], sy)) for i in range(2)]
-            trace = e[0][0] + e[1][1]
-            grad_trace = [sp.diff(trace, sx), sp.diff(trace, sy)]
-            f_sym = [
-                -(2.0 * mu_s * div_e[i] + lam_s * grad_trace[i])
-                for i in range(2)
-            ]
+            div_u = sum(sp.diff(u_sym_vec[i], coords[i]) for i in range(dim))
+            f_sym = []
+            for i in range(dim):
+                lap_u_i = sum(sp.diff(u_sym_vec[i], c, 2) for c in coords)
+                grad_div_i = sp.diff(div_u, coords[i])
+                f_sym.append(-(mu_s * lap_u_i + (lam_s + mu_s) * grad_div_i))
             f_ufl = parse_vector_expression(f_sym, x)
             u_exact_fn = Function(V)
             u_exact_fn.interpolate(parse_vector_expression(u_sym_vec, x))
@@ -186,13 +194,12 @@ class FiredrakeLinearElasticitySolver:
         solve(a == L, uh, bcs=bcs, solver_parameters=sp_dict)
 
         grid_cfg = case_spec["output"]["grid"]
-        _, _, u_grid = sample_vector_magnitude_on_grid(uh, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"])
+        sample_args = (grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"], grid_cfg.get("nz"))
+        *_, u_grid = sample_vector_magnitude_on_grid(uh, *sample_args)
 
         baseline_error = 0.0
         if u_exact_fn is not None:
-            _, _, u_exact_grid = sample_vector_magnitude_on_grid(
-                u_exact_fn, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-            )
+            *_, u_exact_grid = sample_vector_magnitude_on_grid(u_exact_fn, *sample_args)
             baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
             u_grid = u_exact_grid
         else:
@@ -229,7 +236,7 @@ class FiredrakeLinearElasticitySolver:
             ref_uh = Function(ref_V)
             solve(ref_a == ref_L, ref_uh, bcs=ref_bcs, solver_parameters=ref_sp)
 
-            _, _, ref_grid = sample_vector_magnitude_on_grid(ref_uh, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"])
+            *_, ref_grid = sample_vector_magnitude_on_grid(ref_uh, *sample_args)
             baseline_error = compute_rel_L2_grid(u_grid, ref_grid)
             u_grid = ref_grid
 

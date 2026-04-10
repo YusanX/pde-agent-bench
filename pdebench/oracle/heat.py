@@ -21,6 +21,10 @@ from .common import (
     interpolate_expression,
     parse_expression,
     sample_scalar_on_grid,
+    _sample_scalar_grid,
+    _mms_local_dict,
+    _mms_coords,
+    _div_kappa_grad_sym,
 )
 
 
@@ -32,6 +36,7 @@ class HeatSolver:
         t_start_total = time.perf_counter()
         
         msh = create_mesh(case_spec["domain"], case_spec["mesh"])
+        dim = msh.geometry.dim
         V = create_scalar_space(msh, case_spec["fem"]["family"], case_spec["fem"]["degree"])
 
         pde_cfg = case_spec["pde"]
@@ -54,27 +59,23 @@ class HeatSolver:
         f_expr = None
 
         if "u" in manufactured:
-            sx, sy, st = sp.symbols("x y t", real=True)
-            u_sym = sp.sympify(manufactured["u"], locals={"x": sx, "y": sy, "t": st})
+            local_dict = _mms_local_dict(dim, with_t=True)
+            coords = _mms_coords(dim)
+            st = sp.symbols("t", real=True)
+            u_sym = sp.sympify(manufactured["u"], locals=local_dict)
             u_t = sp.diff(u_sym, st)
-            # Support both constant and variable kappa for manufactured solutions:
-            #   u_t - div(kappa * grad u) = f
+
             if kappa_spec.get("type", "constant") == "expr":
-                kappa_sym = sp.sympify(
-                    kappa_spec["expr"], locals={"x": sx, "y": sy, "pi": sp.pi}
-                )
+                kappa_sym = sp.sympify(kappa_spec["expr"], locals=local_dict)
             else:
                 kappa_sym = sp.sympify(kappa_spec.get("value", 1.0))
 
-            f_sym = u_t - (
-                sp.diff(kappa_sym * sp.diff(u_sym, sx), sx)
-                + sp.diff(kappa_sym * sp.diff(u_sym, sy), sy)
-            )
+            f_sym = u_t - _div_kappa_grad_sym(u_sym, kappa_sym, coords)
             u_exact_expr = u_sym
             f_expr = f_sym
         elif source_expr is not None:
-            sx, sy = sp.symbols("x y", real=True)
-            f_expr = sp.sympify(source_expr, locals={"x": sx, "y": sy, "pi": sp.pi})
+            local_dict = _mms_local_dict(dim)
+            f_expr = sp.sympify(source_expr, locals=local_dict)
 
         u_prev = fem.Function(V)
         if u_exact_expr is not None:
@@ -135,20 +136,15 @@ class HeatSolver:
             u_prev.x.array[:] = u_new.x.array
 
         grid_cfg = case_spec["output"]["grid"]
-        _, _, u_grid = sample_scalar_on_grid(
-            u_prev, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-        )
+        u_grid = _sample_scalar_grid(u_prev, grid_cfg)
 
         baseline_error = 0.0
         if u_exact_expr is not None:
             u_exact = fem.Function(V)
             u_exact_expr_t = parse_expression(u_exact_expr, x, t=t)
             interpolate_expression(u_exact, u_exact_expr_t)
-            _, _, u_exact_grid = sample_scalar_on_grid(
-                u_exact, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-            )
+            u_exact_grid = _sample_scalar_grid(u_exact, grid_cfg)
             baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
-            # Use exact grid as reference for evaluation alignment.
             u_grid = u_exact_grid
         else:
             ref_cfg = case_spec.get("reference_config", {})
@@ -212,9 +208,7 @@ class HeatSolver:
                 )
                 ref_u_new = ref_problem.solve()
                 ref_u_prev.x.array[:] = ref_u_new.x.array
-            _, _, ref_grid = sample_scalar_on_grid(
-                ref_u_prev, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-            )
+            ref_grid = _sample_scalar_grid(ref_u_prev, grid_cfg)
             baseline_error = compute_rel_L2_grid(u_grid, ref_grid)
             u_grid = ref_grid
 

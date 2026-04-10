@@ -82,10 +82,10 @@ def _sympy_to_muparser(sym_expr) -> str:
 
 
 def _parse_sym(expr_str: str, extra_locals: Optional[dict] = None):
-    """Parse a sympy expression string, recognising x, y, t, pi."""
+    """Parse a sympy expression string, recognising x, y, z, t, pi."""
     import sympy as sp
-    sx, sy, st = sp.symbols("x y t", real=True)
-    local_dict = {"x": sx, "y": sy, "t": st, "pi": sp.pi}
+    sx, sy, sz, st = sp.symbols("x y z t", real=True)
+    local_dict = {"x": sx, "y": sy, "z": sz, "t": st, "pi": sp.pi}
     if extra_locals:
         local_dict.update(extra_locals)
     return sp.sympify(str(expr_str), locals=local_dict)
@@ -100,9 +100,10 @@ def _expr_to_mu(expr_str: str) -> str:
 # 2.  PDE-specific preprocessing functions
 # ============================================================================
 
-def _preprocess_poisson(pde: dict, bc: dict) -> None:
+def _preprocess_poisson(pde: dict, bc: dict, dim: int = 2) -> None:
     import sympy as sp
-    sx, sy = sp.symbols("x y", real=True)
+    sx, sy, sz = sp.symbols("x y z", real=True)
+    coords = (sx, sy) if dim == 2 else (sx, sy, sz)
 
     kappa_spec = pde.get("coefficients", {}).get(
         "kappa", {"type": "constant", "value": 1.0}
@@ -117,10 +118,7 @@ def _preprocess_poisson(pde: dict, bc: dict) -> None:
     manufactured = pde.get("manufactured_solution", {})
     if "u" in manufactured:
         u_sym = _parse_sym(manufactured["u"])
-        f_sym = -(
-            sp.diff(kappa_sym * sp.diff(u_sym, sx), sx)
-            + sp.diff(kappa_sym * sp.diff(u_sym, sy), sy)
-        )
+        f_sym = -sum(sp.diff(kappa_sym * sp.diff(u_sym, c), c) for c in coords)
         pde["_computed_source"] = _sympy_to_muparser(sp.expand(f_sym))
         pde["_computed_bc"]     = _sympy_to_muparser(u_sym)
         pde["_has_exact"]       = True
@@ -132,7 +130,7 @@ def _preprocess_poisson(pde: dict, bc: dict) -> None:
         pde["_has_exact"]       = False
 
 
-def _preprocess_heat(pde: dict, bc: dict) -> None:
+def _preprocess_heat(pde: dict, bc: dict, dim: int = 2) -> None:
     """
     Heat equation:  ∂u/∂t - κ Δu = f
     For the oracle we only need the *final* time snapshot (u at t_end).
@@ -140,7 +138,8 @@ def _preprocess_heat(pde: dict, bc: dict) -> None:
     _computed_bc (may contain t), _computed_ic (initial condition at t=0).
     """
     import sympy as sp
-    sx, sy, st = sp.symbols("x y t", real=True)
+    sx, sy, sz, st = sp.symbols("x y z t", real=True)
+    coords = (sx, sy) if dim == 2 else (sx, sy, sz)
 
     kappa_spec = pde.get("coefficients", {}).get(
         "kappa", {"type": "constant", "value": 1.0}
@@ -158,8 +157,7 @@ def _preprocess_heat(pde: dict, bc: dict) -> None:
 
         # Source term from PDE: f = ∂u/∂t - κ Δu
         du_dt = sp.diff(u_sym, st)
-        laplacian = sp.diff(kappa_sym * sp.diff(u_sym, sx), sx) + \
-                    sp.diff(kappa_sym * sp.diff(u_sym, sy), sy)
+        laplacian = sum(sp.diff(kappa_sym * sp.diff(u_sym, c), c) for c in coords)
         f_sym = sp.expand(du_dt - laplacian)
 
         pde["_computed_source"] = _sympy_to_muparser(f_sym)
@@ -181,33 +179,41 @@ def _preprocess_heat(pde: dict, bc: dict) -> None:
         pde["_has_exact"]   = False
 
 
-def _preprocess_convection_diffusion(pde: dict, bc: dict) -> None:
+def _preprocess_convection_diffusion(pde: dict, bc: dict, dim: int = 2) -> None:
     """
     ε Δu + β·∇u = f   (steady)  or  ∂u/∂t + β·∇u - ε Δu = f  (transient).
     Source term injected as _computed_source; β components as _computed_beta_x/y.
     """
     import sympy as sp
-    sx, sy, st = sp.symbols("x y t", real=True)
+    sx, sy, sz, st = sp.symbols("x y z t", real=True)
+    coords = (sx, sy) if dim == 2 else (sx, sy, sz)
 
     params = pde.get("pde_params", {})
     epsilon = float(params.get("epsilon", 0.01))
     beta    = params.get("beta", [1.0, 1.0])
     if isinstance(beta, list):
-        bx, by = float(beta[0]), float(beta[1])
+        beta_vals = [float(v) for v in beta]
     else:
-        bx = by = float(beta)
+        beta_vals = [float(beta)] * dim
+    while len(beta_vals) < dim:
+        beta_vals.append(0.0)
+    bx = beta_vals[0]
+    by = beta_vals[1] if dim >= 2 else 0.0
+    bz = beta_vals[2] if dim >= 3 else 0.0
 
     pde["_computed_epsilon"] = str(epsilon)
     pde["_computed_beta_x"]  = str(bx)
     pde["_computed_beta_y"]  = str(by)
+    if dim >= 3:
+        pde["_computed_beta_z"]  = str(bz)
 
     is_transient = "time" in pde
 
     manufactured = pde.get("manufactured_solution", {})
     if "u" in manufactured:
         u_sym = _parse_sym(manufactured["u"])
-        laplacian = sp.diff(u_sym, sx, 2) + sp.diff(u_sym, sy, 2)
-        grad_u = bx * sp.diff(u_sym, sx) + by * sp.diff(u_sym, sy)
+        laplacian = sum(sp.diff(u_sym, c, 2) for c in coords)
+        grad_u = sum(beta_vals[i] * sp.diff(u_sym, coords[i]) for i in range(dim))
 
         if is_transient:
             f_sym = sp.diff(u_sym, st) + grad_u - epsilon * laplacian
@@ -233,21 +239,26 @@ def _preprocess_convection_diffusion(pde: dict, bc: dict) -> None:
         pde["_has_exact"] = False
 
 
-def _preprocess_helmholtz(pde: dict, bc: dict) -> None:
+def _preprocess_helmholtz(pde: dict, bc: dict, dim: int = 2) -> None:
     """
     Δu + k² u = f   with Dirichlet BC.
     """
     import sympy as sp
-    sx, sy = sp.symbols("x y", real=True)
+    sx, sy, sz = sp.symbols("x y z", real=True)
+    coords = (sx, sy) if dim == 2 else (sx, sy, sz)
 
     params = pde.get("pde_params", {})
-    k2 = float(params.get("k2", 1.0))
+    if "k2" in params:
+        k2 = float(params["k2"])
+    else:
+        k = float(params.get("k", params.get("wave_number", 1.0)))
+        k2 = k * k
     pde["_computed_k2"] = str(k2)
 
     manufactured = pde.get("manufactured_solution", {})
     if "u" in manufactured:
         u_sym = _parse_sym(manufactured["u"])
-        f_sym = -(sp.diff(u_sym, sx, 2) + sp.diff(u_sym, sy, 2)) - k2 * u_sym
+        f_sym = -sum(sp.diff(u_sym, c, 2) for c in coords) - k2 * u_sym
         pde["_computed_source"] = _sympy_to_muparser(sp.expand(f_sym))
         pde["_computed_bc"]     = _sympy_to_muparser(u_sym)
         pde["_has_exact"]       = True
@@ -282,13 +293,14 @@ def _preprocess_biharmonic(pde: dict, bc: dict) -> None:
         pde["_has_exact"]        = False
 
 
-def _preprocess_linear_elasticity(pde: dict, bc: dict) -> None:
+def _preprocess_linear_elasticity(pde: dict, bc: dict, dim: int = 2) -> None:
     """
     -∇·σ(u) = f, σ = λ(∇·u)I + μ(∇u + ∇uᵀ)
-    Manufactured solution: u = [ux, uy].
+    Manufactured solution: u = [ux, uy] or [ux, uy, uz].
     """
     import sympy as sp
-    sx, sy = sp.symbols("x y", real=True)
+    sx, sy, sz = sp.symbols("x y z", real=True)
+    coords = (sx, sy) if dim == 2 else (sx, sy, sz)
 
     params = pde.get("pde_params", {})
     if "lambda" in params and "mu" in params:
@@ -305,44 +317,47 @@ def _preprocess_linear_elasticity(pde: dict, bc: dict) -> None:
 
     manufactured = pde.get("manufactured_solution", {})
     if "u" in manufactured and isinstance(manufactured["u"], list):
-        ux_sym = _parse_sym(manufactured["u"][0])
-        uy_sym = _parse_sym(manufactured["u"][1])
+        u_syms = [_parse_sym(comp) for comp in manufactured["u"]]
+        if len(u_syms) != dim:
+            raise ValueError(
+                f"linear_elasticity manufactured solution expects {dim} components, "
+                f"got {len(u_syms)}"
+            )
 
-        # Divergence of u
-        div_u = sp.diff(ux_sym, sx) + sp.diff(uy_sym, sy)
+        div_u = sum(sp.diff(u_syms[i], coords[i]) for i in range(dim))
+        f_syms = []
+        for i in range(dim):
+            lap_u_i = sum(sp.diff(u_syms[i], c, 2) for c in coords)
+            grad_div_i = sp.diff(div_u, coords[i])
+            f_syms.append(sp.expand(-(mu * lap_u_i + (lam + mu) * grad_div_i)))
 
-        # Strain ε_ij
-        exx = sp.diff(ux_sym, sx)
-        exy = sp.Rational(1, 2) * (sp.diff(ux_sym, sy) + sp.diff(uy_sym, sx))
-        eyy = sp.diff(uy_sym, sy)
-
-        # Stress σ_ij = λ div_u δ_ij + 2μ ε_ij
-        sxx = lam * div_u + 2 * mu * exx
-        sxy = 2 * mu * exy
-        syy = lam * div_u + 2 * mu * eyy
-
-        # Body force: f = -∇·σ
-        fx_sym = -(sp.diff(sxx, sx) + sp.diff(sxy, sy))
-        fy_sym = -(sp.diff(sxy, sx) + sp.diff(syy, sy))
-
-        pde["_computed_source_x"] = _sympy_to_muparser(sp.expand(fx_sym))
-        pde["_computed_source_y"] = _sympy_to_muparser(sp.expand(fy_sym))
-        pde["_computed_bc_x"]     = _sympy_to_muparser(ux_sym)
-        pde["_computed_bc_y"]     = _sympy_to_muparser(uy_sym)
+        pde["_computed_source_x"] = _sympy_to_muparser(f_syms[0])
+        pde["_computed_source_y"] = _sympy_to_muparser(f_syms[1])
+        pde["_computed_bc_x"]     = _sympy_to_muparser(u_syms[0])
+        pde["_computed_bc_y"]     = _sympy_to_muparser(u_syms[1])
+        if dim >= 3:
+            pde["_computed_source_z"] = _sympy_to_muparser(f_syms[2])
+            pde["_computed_bc_z"]     = _sympy_to_muparser(u_syms[2])
         pde["_has_exact"]         = True
     else:
-        src = pde.get("source_term", ["0.0", "0.0"])
-        if isinstance(src, (list, tuple)) and len(src) >= 2:
+        src = pde.get("source_term", ["0.0"] * dim)
+        if isinstance(src, (list, tuple)) and len(src) >= dim:
             pde["_computed_source_x"] = _expr_to_mu(src[0])
             pde["_computed_source_y"] = _expr_to_mu(src[1])
+            if dim >= 3:
+                pde["_computed_source_z"] = _expr_to_mu(src[2])
         else:
             pde["_computed_source_x"] = "0.0"
             pde["_computed_source_y"] = "0.0"
+            if dim >= 3:
+                pde["_computed_source_z"] = "0.0"
 
         # For no-exact cases, C++ reads the raw bc.dirichlet JSON directly to
         # support boundary subsets such as x0/x1/y0/y1 and lists of constraints.
         pde["_computed_bc_x"]     = "0.0"
         pde["_computed_bc_y"]     = "0.0"
+        if dim >= 3:
+            pde["_computed_bc_z"] = "0.0"
         pde["_has_exact"]         = False
 
 
@@ -393,13 +408,14 @@ def _preprocess_reaction_diffusion(pde: dict, bc: dict) -> None:
         pde["_has_exact"] = False
 
 
-def _preprocess_stokes(pde: dict, bc: dict) -> None:
+def _preprocess_stokes(pde: dict, bc: dict, dim: int = 2) -> None:
     """
     -ν Δu + ∇p = f,  ∇·u = 0
-    Manufactured: u = [ux, uy],  p = p_exact.
+    Manufactured: u = [ux, uy] or [ux, uy, uz],  p = p_exact.
     """
     import sympy as sp
-    sx, sy = sp.symbols("x y", real=True)
+    sx, sy, sz = sp.symbols("x y z", real=True)
+    coords = (sx, sy) if dim == 2 else (sx, sy, sz)
 
     params = pde.get("pde_params", {})
     nu = float(params.get("nu", 1.0))
@@ -407,37 +423,48 @@ def _preprocess_stokes(pde: dict, bc: dict) -> None:
 
     manufactured = pde.get("manufactured_solution", {})
     if "u" in manufactured and "p" in manufactured and isinstance(manufactured["u"], list):
-        ux_sym = _parse_sym(manufactured["u"][0])
-        uy_sym = _parse_sym(manufactured["u"][1])
+        u_syms = [_parse_sym(comp) for comp in manufactured["u"]]
+        if len(u_syms) != dim:
+            raise ValueError(
+                f"stokes manufactured solution expects {dim} velocity components, "
+                f"got {len(u_syms)}"
+            )
         p_sym  = _parse_sym(manufactured["p"])
 
-        lap_ux = sp.diff(ux_sym, sx, 2) + sp.diff(ux_sym, sy, 2)
-        lap_uy = sp.diff(uy_sym, sx, 2) + sp.diff(uy_sym, sy, 2)
-        dp_dx  = sp.diff(p_sym, sx)
-        dp_dy  = sp.diff(p_sym, sy)
+        f_syms = []
+        for i in range(dim):
+            lap_ui = sum(sp.diff(u_syms[i], c, 2) for c in coords)
+            dp_i = sp.diff(p_sym, coords[i])
+            f_syms.append(sp.expand(-nu * lap_ui + dp_i))
 
-        fx_sym = -nu * lap_ux + dp_dx
-        fy_sym = -nu * lap_uy + dp_dy
-
-        pde["_computed_source_x"] = _sympy_to_muparser(sp.expand(fx_sym))
-        pde["_computed_source_y"] = _sympy_to_muparser(sp.expand(fy_sym))
-        pde["_computed_bc_x"]     = _sympy_to_muparser(ux_sym)
-        pde["_computed_bc_y"]     = _sympy_to_muparser(uy_sym)
+        pde["_computed_source_x"] = _sympy_to_muparser(f_syms[0])
+        pde["_computed_source_y"] = _sympy_to_muparser(f_syms[1])
+        pde["_computed_bc_x"]     = _sympy_to_muparser(u_syms[0])
+        pde["_computed_bc_y"]     = _sympy_to_muparser(u_syms[1])
+        if dim >= 3:
+            pde["_computed_source_z"] = _sympy_to_muparser(f_syms[2])
+            pde["_computed_bc_z"]     = _sympy_to_muparser(u_syms[2])
         pde["_computed_p_exact"]  = _sympy_to_muparser(p_sym)
         pde["_has_exact"]         = True
     else:
-        src = pde.get("source_term", ["0.0", "0.0"])
-        if isinstance(src, (list, tuple)) and len(src) >= 2:
+        src = pde.get("source_term", ["0.0"] * dim)
+        if isinstance(src, (list, tuple)) and len(src) >= dim:
             pde["_computed_source_x"] = _expr_to_mu(src[0])
             pde["_computed_source_y"] = _expr_to_mu(src[1])
+            if dim >= 3:
+                pde["_computed_source_z"] = _expr_to_mu(src[2])
         else:
             pde["_computed_source_x"] = "0.0"
             pde["_computed_source_y"] = "0.0"
+            if dim >= 3:
+                pde["_computed_source_z"] = "0.0"
 
         # For no-exact cases, C++ reads the raw bc.dirichlet JSON directly to
         # support boundary subsets such as x0/x1/y0/y1 and mixed inflow/outflow.
         pde["_computed_bc_x"]     = "0.0"
         pde["_computed_bc_y"]     = "0.0"
+        if dim >= 3:
+            pde["_computed_bc_z"] = "0.0"
         pde["_has_exact"]         = False
 
 
@@ -560,6 +587,8 @@ def preprocess_case_spec(oracle_config: Dict[str, Any]) -> Dict[str, Any]:
     spec = copy.deepcopy(oracle_config)
     pde  = spec["pde"]
     bc   = spec.get("bc", {}).get("dirichlet", {})
+    grid = spec.get("output", {}).get("grid", {})
+    dim = 3 if len(grid.get("bbox", [])) == 6 or spec.get("domain", {}).get("type") == "unit_cube" else 2
 
     pde_type = pde["type"]
     processor = _PREPROCESSORS.get(pde_type)
@@ -568,7 +597,10 @@ def preprocess_case_spec(oracle_config: Dict[str, Any]) -> Dict[str, Any]:
             f"DealII oracle: no preprocessor for PDE type '{pde_type}'. "
             f"Supported: {list(_PREPROCESSORS)}"
         )
-    processor(pde, bc)
+    if pde_type in ("poisson", "heat", "convection_diffusion", "helmholtz", "linear_elasticity", "stokes"):
+        processor(pde, bc, dim)
+    else:
+        processor(pde, bc)
     return spec
 
 
@@ -710,8 +742,8 @@ def parse_output(outdir: Path) -> Tuple[np.ndarray, Dict[str, Any]]:
     Read solution_grid.bin and meta.json from the C++ output directory.
 
     Returns:
-        grid  – np.ndarray of shape (ny, nx), float64
-        meta  – dict with nx, ny, num_dofs, baseline_time, ksp_type, …
+        grid  – np.ndarray of shape (ny, nx) or (nz, ny, nx), float64
+        meta  – dict with nx, ny, [nz], num_dofs, baseline_time, ksp_type, …
     """
     bin_file  = outdir / "solution_grid.bin"
     meta_file = outdir / "meta.json"
@@ -724,12 +756,14 @@ def parse_output(outdir: Path) -> Tuple[np.ndarray, Dict[str, Any]]:
     meta = json.loads(meta_file.read_text())
     nx   = int(meta["nx"])
     ny   = int(meta["ny"])
+    nz   = int(meta["nz"]) if "nz" in meta else None
 
     raw  = np.fromfile(str(bin_file), dtype=np.float64)
-    if raw.size != nx * ny:
+    expected_size = nx * ny if nz is None else nx * ny * nz
+    if raw.size != expected_size:
         raise ValueError(
-            f"Binary size mismatch: expected {nx * ny} values, got {raw.size}"
+            f"Binary size mismatch: expected {expected_size} values, got {raw.size}"
         )
 
-    grid = raw.reshape(ny, nx)
+    grid = raw.reshape(ny, nx) if nz is None else raw.reshape(nz, ny, nx)
     return grid, meta

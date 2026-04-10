@@ -35,6 +35,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -59,9 +60,14 @@ struct FemSpec {
 };
 
 struct OutputGridSpec {
-  std::array<double, 4> bbox = {0.0, 1.0, 0.0, 1.0};
+  std::vector<double> bbox = {0.0, 1.0, 0.0, 1.0};
   int nx = 50;
   int ny = 50;
+  int nz = 0;
+
+  bool is_3d() const {
+    return bbox.size() == 6 && nz > 0;
+  }
 };
 
 struct SolverSpec {
@@ -163,10 +169,11 @@ inline CaseSpec read_case_spec(const std::string& filepath) {
     auto& g = j["output"]["grid"];
     if (g.contains("bbox")) {
       auto b = g["bbox"].get<std::vector<double>>();
-      spec.output_grid.bbox = {b[0], b[1], b[2], b[3]};
+      spec.output_grid.bbox = b;
     }
     spec.output_grid.nx = g.value("nx", 50);
     spec.output_grid.ny = g.value("ny", 50);
+    spec.output_grid.nz = g.value("nz", 0);
   }
 
   // ---- Oracle solver -------------------------------------------------------

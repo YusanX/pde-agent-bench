@@ -97,11 +97,19 @@ class FiredrakeConvectionDiffusionSolver:
         msh = create_mesh(case_spec["domain"], case_spec["mesh"])
         V = create_scalar_space(msh, case_spec["fem"]["family"], case_spec["fem"]["degree"])
         x = SpatialCoordinate(msh)
+        dim = msh.geometric_dimension()
 
         pde_cfg = case_spec["pde"]
         params = pde_cfg.get("pde_params", {})
         epsilon = float(params.get("epsilon", 0.01))
         beta = params.get("beta", [1.0, 1.0])
+        if isinstance(beta, (int, float)):
+            beta = [float(beta)] * dim
+        else:
+            beta = [float(v) for v in beta]
+        while len(beta) < dim:
+            beta.append(0.0)
+        beta = beta[:dim]
         beta_vec = as_vector(beta)
         source_expr = pde_cfg.get("source_term")
         time_cfg = pde_cfg.get("time")
@@ -115,20 +123,27 @@ class FiredrakeConvectionDiffusionSolver:
         )
         stabilization = solver_params.get("stabilization", params.get("stabilization"))
 
+        def _mms_symbols(with_time: bool = False):
+            sx, sy, sz, st = sp.symbols("x y z t", real=True)
+            locals_dict = {"x": sx, "y": sy, "pi": sp.pi}
+            coords = [sx, sy]
+            if dim >= 3:
+                locals_dict["z"] = sz
+                coords.append(sz)
+            if with_time:
+                locals_dict["t"] = st
+            return locals_dict, tuple(coords), st
+
         # ── STEADY ──────────────────────────────────────────────────────────
         if time_cfg is None:
             u_exact_fn = None
             f_ufl = None
 
             if "u" in manufactured:
-                sx, sy = sp.symbols("x y", real=True)
-                u_sym = sp.sympify(manufactured["u"], locals={"x": sx, "y": sy})
-                bx, by = beta
-                f_sym = (
-                    -epsilon * (sp.diff(u_sym, sx, 2) + sp.diff(u_sym, sy, 2))
-                    + bx * sp.diff(u_sym, sx)
-                    + by * sp.diff(u_sym, sy)
-                )
+                local_dict, coords, _ = _mms_symbols()
+                u_sym = sp.sympify(manufactured["u"], locals=local_dict)
+                f_sym = -epsilon * sum(sp.diff(u_sym, c, 2) for c in coords)
+                f_sym += sum(beta[i] * sp.diff(u_sym, coords[i]) for i in range(dim))
                 f_ufl = parse_expression(f_sym, x)
                 u_exact_fn = Function(V)
                 u_exact_fn.interpolate(parse_expression(u_sym, x))
@@ -163,13 +178,12 @@ class FiredrakeConvectionDiffusionSolver:
             )
 
             grid_cfg = case_spec["output"]["grid"]
-            _, _, u_grid = sample_scalar_on_grid(uh, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"])
+            sample_args = (grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"], grid_cfg.get("nz"))
+            *_, u_grid = sample_scalar_on_grid(uh, *sample_args)
 
             baseline_error = 0.0
             if u_exact_fn is not None:
-                _, _, u_exact_grid = sample_scalar_on_grid(
-                    u_exact_fn, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-                )
+                *_, u_exact_grid = sample_scalar_on_grid(u_exact_fn, *sample_args)
                 baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
                 u_grid = u_exact_grid
             else:
@@ -217,7 +231,7 @@ class FiredrakeConvectionDiffusionSolver:
                     ref_a, ref_L, ref_V, ref_bcs, ref_sp, allow_fallback=True
                 )
 
-                _, _, ref_grid = sample_scalar_on_grid(ref_uh, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"])
+                *_, ref_grid = sample_scalar_on_grid(ref_uh, *sample_args)
                 baseline_error = compute_rel_L2_grid(u_grid, ref_grid)
                 u_grid = ref_grid
 
@@ -233,20 +247,15 @@ class FiredrakeConvectionDiffusionSolver:
             f_sym = None
 
             if "u" in manufactured:
-                sx, sy, st = sp.symbols("x y t", real=True)
-                u_sym = sp.sympify(manufactured["u"], locals={"x": sx, "y": sy, "t": st})
+                local_dict, coords, st = _mms_symbols(with_time=True)
+                u_sym = sp.sympify(manufactured["u"], locals=local_dict)
                 u_t = sp.diff(u_sym, st)
-                bx, by = beta
-                f_sym = (
-                    u_t
-                    - epsilon * (sp.diff(u_sym, sx, 2) + sp.diff(u_sym, sy, 2))
-                    + bx * sp.diff(u_sym, sx)
-                    + by * sp.diff(u_sym, sy)
-                )
+                f_sym = u_t - epsilon * sum(sp.diff(u_sym, c, 2) for c in coords)
+                f_sym += sum(beta[i] * sp.diff(u_sym, coords[i]) for i in range(dim))
                 u_exact_sym = u_sym
             elif source_expr is not None:
-                sx, sy, st = sp.symbols("x y t", real=True)
-                f_sym = sp.sympify(source_expr, locals={"x": sx, "y": sy, "t": st})
+                local_dict, _, _ = _mms_symbols(with_time=True)
+                f_sym = sp.sympify(source_expr, locals=local_dict)
 
             u_prev = Function(V)
             if u_exact_sym is not None:
@@ -277,15 +286,14 @@ class FiredrakeConvectionDiffusionSolver:
                 u_prev.assign(uh)
 
             grid_cfg = case_spec["output"]["grid"]
-            _, _, u_grid = sample_scalar_on_grid(u_prev, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"])
+            sample_args = (grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"], grid_cfg.get("nz"))
+            *_, u_grid = sample_scalar_on_grid(u_prev, *sample_args)
 
             baseline_error = 0.0
             if u_exact_sym is not None:
                 u_exact_fn = Function(V)
                 u_exact_fn.interpolate(parse_expression(u_exact_sym, x, t=t_cur))
-                _, _, u_exact_grid = sample_scalar_on_grid(
-                    u_exact_fn, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-                )
+                *_, u_exact_grid = sample_scalar_on_grid(u_exact_fn, *sample_args)
                 baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
                 u_grid = u_exact_grid
             else:
@@ -332,7 +340,7 @@ class FiredrakeConvectionDiffusionSolver:
                     )
                     ref_u_prev.assign(ref_uh)
 
-                _, _, ref_grid = sample_scalar_on_grid(ref_u_prev, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"])
+                *_, ref_grid = sample_scalar_on_grid(ref_u_prev, *sample_args)
                 baseline_error = compute_rel_L2_grid(u_grid, ref_grid)
                 u_grid = ref_grid
 

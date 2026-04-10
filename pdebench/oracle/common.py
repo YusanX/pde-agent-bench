@@ -12,12 +12,6 @@ from dolfinx.mesh import CellType
 from mpi4py import MPI
 from petsc4py import PETSc
 import os
-from typing import Dict, Any
-import numpy as np
-import pygmsh
-import meshio
-from mpi4py import MPI
-from dolfinx import mesh
 from dolfinx.io import XDMFFile
 from dolfinx.mesh import CellType
 
@@ -50,11 +44,22 @@ def create_mesh(domain_spec: Dict[str, Any], mesh_spec: Dict[str, Any]) -> mesh.
                 if os.path.exists(fname + ext): os.remove(fname + ext)
         return d_mesh
 
-    # 内置基础形状
+    # 内置基础形状（不需要 pygmsh）
     if domain_type == "unit_square":
-        return mesh.create_unit_square(MPI.COMM_WORLD, resolution, resolution)
+        cell_type_str = mesh_spec.get("cell_type", "triangle")
+        from dolfinx.mesh import CellType
+        ct = CellType.quadrilateral if cell_type_str == "quadrilateral" else CellType.triangle
+        return mesh.create_unit_square(MPI.COMM_WORLD, resolution, resolution, ct)
 
-    # 复杂几何 (OpenCASCADE 内核)
+    if domain_type == "unit_cube":
+        cell_type_str = mesh_spec.get("cell_type", "tetrahedron")
+        from dolfinx.mesh import CellType
+        ct = CellType.hexahedron if cell_type_str == "hexahedron" else CellType.tetrahedron
+        return mesh.create_unit_cube(MPI.COMM_WORLD, resolution, resolution, resolution, ct)
+
+    # 复杂几何 (OpenCASCADE 内核) — 延迟导入 pygmsh/meshio
+    import pygmsh
+    import meshio
     with pygmsh.occ.Geometry() as geom:
         import gmsh
         gmsh.option.setNumber("General.Verbosity", 0)
@@ -389,3 +394,154 @@ def create_periodic_map(extents: List[float], direction: str = "both"):
             out_x[1][is_top] = ymin
         return out_x
     return periodic_map
+
+
+# =============================================================================
+# 3-D grid sampling
+# =============================================================================
+
+def _eval_on_grid_3d(
+    msh: mesh.Mesh,
+    eval_fn,
+    bbox: List[float],
+    nx: int,
+    ny: int,
+    nz: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
+    """Sample a scalar function on a 3-D uniform grid.
+
+    Returns (x_grid, y_grid, z_grid, values) where values has shape (nz, ny, nx).
+    Points outside the mesh are NaN (handled by compute_rel_L2_grid NaN-safe logic).
+    """
+    from dolfinx import geometry
+
+    x_grid = np.linspace(bbox[0], bbox[1], nx)
+    y_grid = np.linspace(bbox[2], bbox[3], ny)
+    z_grid = np.linspace(bbox[4], bbox[5], nz)
+
+    # Build flat point list: C-order (nz, ny, nx) → flat index iz*ny*nx + iy*nx + ix
+    iz_idx, iy_idx, ix_idx = np.meshgrid(
+        np.arange(nz), np.arange(ny), np.arange(nx), indexing="ij"
+    )
+    points = np.zeros((nz * ny * nx, 3))
+    points[:, 0] = x_grid[ix_idx.ravel()]
+    points[:, 1] = y_grid[iy_idx.ravel()]
+    points[:, 2] = z_grid[iz_idx.ravel()]
+
+    bb_tree = geometry.bb_tree(msh, msh.topology.dim)
+    cell_candidates = geometry.compute_collisions_points(bb_tree, points)
+    colliding_cells = geometry.compute_colliding_cells(msh, cell_candidates, points)
+
+    local_values = np.full(points.shape[0], np.nan)
+    points_on_proc, cells_on_proc, eval_map = [], [], []
+    for i in range(points.shape[0]):
+        if len(colliding_cells.links(i)) > 0:
+            points_on_proc.append(points[i])
+            cells_on_proc.append(colliding_cells.links(i)[0])
+            eval_map.append(i)
+
+    if points_on_proc:
+        values_eval = eval_fn(np.array(points_on_proc), np.array(cells_on_proc))
+        local_values[eval_map] = values_eval.flatten()
+
+    local_values_zero = np.nan_to_num(local_values, nan=0.0)
+    total_values = np.zeros_like(local_values_zero)
+    msh.comm.Reduce(local_values_zero, total_values, op=MPI.SUM, root=0)
+
+    if msh.comm.rank == 0:
+        return x_grid, y_grid, z_grid, total_values.reshape(nz, ny, nx)
+    else:
+        return x_grid, y_grid, z_grid, None
+
+
+def sample_scalar_on_grid_3d(
+    u_fem: fem.Function, bbox: List[float], nx: int, ny: int, nz: int
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
+    """Sample a scalar FEM function on a 3-D uniform grid."""
+    msh = u_fem.function_space.mesh
+    return _eval_on_grid_3d(
+        msh,
+        lambda pts, cells: u_fem.eval(pts, cells).flatten(),
+        bbox, nx, ny, nz,
+    )
+
+
+def sample_vector_magnitude_on_grid_3d(
+    u_vec: fem.Function, bbox: List[float], nx: int, ny: int, nz: int
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
+    """Sample ||u|| of a vector FEM function on a 3-D uniform grid."""
+    msh = u_vec.function_space.mesh
+
+    def eval_fn(pts, cells):
+        values = u_vec.eval(pts, cells)
+        return np.linalg.norm(values, axis=1)
+
+    return _eval_on_grid_3d(msh, eval_fn, bbox, nx, ny, nz)
+
+
+# =============================================================================
+# Dimension-aware sampling dispatchers
+# =============================================================================
+
+def _is_3d_grid(grid_cfg: Dict[str, Any]) -> bool:
+    """Return True if grid_cfg describes a 3-D sampling grid."""
+    return len(grid_cfg.get("bbox", [])) == 6 and "nz" in grid_cfg
+
+
+def _sample_scalar_grid(
+    u_fem: fem.Function, grid_cfg: Dict[str, Any]
+) -> Optional[np.ndarray]:
+    """Sample a scalar FEM function on the grid in grid_cfg (2-D or 3-D)."""
+    bbox = grid_cfg["bbox"]
+    nx, ny = grid_cfg["nx"], grid_cfg["ny"]
+    if _is_3d_grid(grid_cfg):
+        _, _, _, arr = sample_scalar_on_grid_3d(u_fem, bbox, nx, ny, grid_cfg["nz"])
+        return arr
+    else:
+        _, _, arr = sample_scalar_on_grid(u_fem, bbox, nx, ny)
+        return arr
+
+
+def _sample_vector_mag_grid(
+    u_vec: fem.Function, grid_cfg: Dict[str, Any]
+) -> Optional[np.ndarray]:
+    """Sample ||u|| of a vector FEM function on the grid in grid_cfg (2-D or 3-D)."""
+    bbox = grid_cfg["bbox"]
+    nx, ny = grid_cfg["nx"], grid_cfg["ny"]
+    if _is_3d_grid(grid_cfg):
+        _, _, _, arr = sample_vector_magnitude_on_grid_3d(u_vec, bbox, nx, ny, grid_cfg["nz"])
+        return arr
+    else:
+        _, _, arr = sample_vector_magnitude_on_grid(u_vec, bbox, nx, ny)
+        return arr
+
+
+# =============================================================================
+# MMS (Method of Manufactured Solutions) symbolic helpers
+# =============================================================================
+
+def _mms_local_dict(dim: int, with_t: bool = False) -> Dict[str, Any]:
+    """Return a sympy locals dict for parsing MMS expressions in 2-D or 3-D."""
+    sx, sy, sz, st = sp.symbols("x y z t", real=True)
+    d: Dict[str, Any] = {"x": sx, "y": sy, "pi": sp.pi}
+    if dim >= 3:
+        d["z"] = sz
+    if with_t:
+        d["t"] = st
+    return d
+
+
+def _mms_coords(dim: int) -> Tuple:
+    """Return spatial sympy symbols as a tuple for the given dimension."""
+    sx, sy, sz = sp.symbols("x y z", real=True)
+    return (sx, sy) if dim == 2 else (sx, sy, sz)
+
+
+def _laplacian_sym(u_sym: Any, coords: Tuple) -> Any:
+    """Return the symbolic Laplacian ∑ ∂²u/∂xᵢ² for the given coordinates."""
+    return sum(sp.diff(u_sym, c, 2) for c in coords)
+
+
+def _div_kappa_grad_sym(u_sym: Any, kappa_sym: Any, coords: Tuple) -> Any:
+    """Return symbolic ∇·(κ ∇u) = ∑ ∂/∂xᵢ (κ ∂u/∂xᵢ)."""
+    return sum(sp.diff(kappa_sym * sp.diff(u_sym, c), c) for c in coords)

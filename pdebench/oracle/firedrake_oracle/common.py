@@ -22,6 +22,7 @@ import sympy as sp
 # Firedrake re-exports UFL; we import everything from firedrake for convenience.
 from firedrake import (
     UnitSquareMesh,
+    UnitCubeMesh,
     FunctionSpace,
     VectorFunctionSpace,
     MixedFunctionSpace,
@@ -84,6 +85,10 @@ def create_mesh(domain_spec: Dict[str, Any], mesh_spec: Dict[str, Any]):
     if domain_type == "unit_square":
         quad = (cell_type == "quadrilateral")
         return UnitSquareMesh(resolution, resolution, quadrilateral=quad)
+
+    if domain_type == "unit_cube":
+        hexahedral = (cell_type == "hexahedron")
+        return UnitCubeMesh(resolution, resolution, resolution, hexahedral=hexahedral)
 
     raise ValueError(f"Unsupported domain type for Firedrake: {domain_type}")
 
@@ -261,24 +266,53 @@ def _make_grid_coords(bbox: List[float], nx: int, ny: int):
     return x_lin, y_lin, coords, (ny, nx)
 
 
+def _make_grid_coords_3d(bbox: List[float], nx: int, ny: int, nz: int):
+    """Build a uniform 3-D grid with shape (nz, ny, nx)."""
+    xmin, xmax, ymin, ymax, zmin, zmax = bbox
+    x_lin = np.linspace(xmin, xmax, nx)
+    y_lin = np.linspace(ymin, ymax, ny)
+    z_lin = np.linspace(zmin, zmax, nz)
+    zz, yy, xx = np.meshgrid(z_lin, y_lin, x_lin, indexing="ij")
+    coords = np.stack([xx.ravel(), yy.ravel(), zz.ravel()], axis=-1)
+    return x_lin, y_lin, z_lin, coords, (nz, ny, nx)
+
+
+def _is_3d_grid(bbox: List[float], nz: Optional[int] = None) -> bool:
+    return len(bbox) == 6 and nz is not None
+
+
 def sample_scalar_on_grid(
-    u_h: Function, bbox: List[float], nx: int, ny: int
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    u_h: Function, bbox: List[float], nx: int, ny: int, nz: Optional[int] = None
+) -> Tuple[np.ndarray, ...]:
     """Sample a scalar Function on a uniform grid.
 
     Uses ``Function.at(coords)`` which is guaranteed to return values in the
     same order as the input coordinates, avoiding the VertexOnlyMesh internal
     reordering issue that corrupts grid-point values.
     """
+    if _is_3d_grid(bbox, nz):
+        x_lin, y_lin, z_lin, coords, shape = _make_grid_coords_3d(bbox, nx, ny, int(nz))
+        values = np.array(u_h.at(coords))
+        return x_lin, y_lin, z_lin, values.reshape(shape)
+
     x_lin, y_lin, coords, shape = _make_grid_coords(bbox, nx, ny)
     values = np.array(u_h.at(coords))   # shape (ny*nx,), input-order guaranteed
     return x_lin, y_lin, values.reshape(shape)
 
 
 def sample_vector_magnitude_on_grid(
-    u_h: Function, bbox: List[float], nx: int, ny: int
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    u_h: Function, bbox: List[float], nx: int, ny: int, nz: Optional[int] = None
+) -> Tuple[np.ndarray, ...]:
     """Sample ||u|| of a vector Function on a uniform grid."""
+    if _is_3d_grid(bbox, nz):
+        x_lin, y_lin, z_lin, coords, shape = _make_grid_coords_3d(bbox, nx, ny, int(nz))
+        vals = np.array(u_h.at(coords))
+        if vals.ndim == 1:
+            magnitudes = np.abs(vals)
+        else:
+            magnitudes = np.linalg.norm(vals, axis=1)
+        return x_lin, y_lin, z_lin, magnitudes.reshape(shape)
+
     x_lin, y_lin, coords, shape = _make_grid_coords(bbox, nx, ny)
     vals = np.array(u_h.at(coords))   # shape (ny*nx, gdim), input-order guaranteed
     if vals.ndim == 1:
