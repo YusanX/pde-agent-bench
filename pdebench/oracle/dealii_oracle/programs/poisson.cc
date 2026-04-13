@@ -1,15 +1,12 @@
 /**
  * poisson.cc  –  deal.II oracle for the Poisson equation
  *
- *   -∇·(κ ∇u) = f   in Ω = [0,1]^d
+ *   -∇·(κ ∇u) = f   in Ω
  *           u = g   on ∂Ω
  *
- * Usage:
- *   ./poisson_solver <case_spec.json> <output_dir>
- *
- * The case_spec.json must contain _computed_kappa, _computed_source and
- * _computed_bc fields (injected by the Python DealIIOracleSolver.preprocess()).
- * All expression strings use muParser syntax (^ for power, pi as constant).
+ * Supports both unit-square/cube domains (FE_Q, structured quad mesh) and
+ * complex 2-D geometries loaded from a Gmsh .msh file (FE_SimplexP, triangular
+ * mesh).  The mesh type is detected at run-time via mesh_factory.h.
  */
 
 #include <cmath>
@@ -19,15 +16,16 @@
 #include <memory>
 #include <string>
 
-// deal.II headers
 #include <deal.II/base/function_parser.h>
 #include <deal.II/base/quadrature_lib.h>
 #include <deal.II/base/timer.h>
 #include <deal.II/dofs/dof_handler.h>
 #include <deal.II/dofs/dof_tools.h>
 #include <deal.II/fe/fe_q.h>
+#include <deal.II/fe/fe_simplex_p.h>
 #include <deal.II/fe/fe_values.h>
 #include <deal.II/grid/grid_generator.h>
+#include <deal.II/grid/grid_in.h>
 #include <deal.II/grid/tria.h>
 #include <deal.II/lac/affine_constraints.h>
 #include <deal.II/lac/dynamic_sparsity_pattern.h>
@@ -41,31 +39,29 @@
 #include <deal.II/lac/vector.h>
 #include <deal.II/numerics/vector_tools.h>
 
-// Project headers
 #include "case_spec_reader.h"
 #include "grid_writer.h"
+#include "mesh_factory.h"
 
 using namespace dealii;
 
 namespace {
-
 static const std::map<std::string, double> MU_CONSTANTS = {{"pi", M_PI}};
 
 template <int dim>
 std::unique_ptr<FunctionParser<dim>>
 make_func(const std::string& expr, bool time_dep = false) {
-  auto fp = std::make_unique<FunctionParser<dim>>(1 /*n_components*/);
+  auto fp = std::make_unique<FunctionParser<dim>>(1);
   fp->initialize(dim == 2 ? "x,y" : "x,y,z", expr, MU_CONSTANTS, time_dep);
   return fp;
 }
-
 }  // namespace
 
 template <int dim>
 class PoissonOracle {
  public:
   explicit PoissonOracle(const CaseSpec& spec)
-      : spec_(spec), fe_(spec.fem.degree), dof_handler_(tria_) {}
+      : spec_(spec), dof_handler_(tria_) {}
 
   void run(const std::string& outdir) {
     std::filesystem::create_directories(outdir);
@@ -91,7 +87,8 @@ class PoissonOracle {
  private:
   const CaseSpec&            spec_;
   Triangulation<dim>         tria_;
-  FE_Q<dim>                  fe_;
+  bool                       is_simplex_ = false;
+  std::unique_ptr<FiniteElement<dim>> fe_;
   DoFHandler<dim>            dof_handler_;
   AffineConstraints<double>  constraints_;
   SparsityPattern            sparsity_pattern_;
@@ -100,11 +97,12 @@ class PoissonOracle {
   Vector<double>             system_rhs_;
 
   void make_mesh() {
-    GridGenerator::subdivided_hyper_cube(tria_, spec_.mesh.resolution, 0.0, 1.0);
+    is_simplex_ = oracle_util::make_mesh<dim>(spec_, tria_);
+    fe_ = oracle_util::make_scalar_fe<dim>(spec_.fem.degree, is_simplex_);
   }
 
   void setup_system() {
-    dof_handler_.distribute_dofs(fe_);
+    dof_handler_.distribute_dofs(*fe_);
     constraints_.clear();
 
     const std::string bc_expr = spec_.computed_bc();
@@ -133,12 +131,12 @@ class PoissonOracle {
     auto kappa_func  = make_func<dim>(kappa_expr);
     auto source_func = make_func<dim>(source_expr);
 
-    const QGauss<dim> quadrature(fe_.degree + 1);
-    FEValues<dim> fe_values(fe_, quadrature,
+    const auto quadrature = oracle_util::make_quadrature<dim>(*fe_);
+    FEValues<dim> fe_values(*fe_, quadrature,
                             update_values | update_gradients |
                             update_JxW_values | update_quadrature_points);
 
-    const unsigned int n_dpc  = fe_.n_dofs_per_cell();
+    const unsigned int n_dpc  = fe_->n_dofs_per_cell();
     const unsigned int n_q    = quadrature.size();
 
     FullMatrix<double> cell_matrix(n_dpc, n_dpc);
@@ -185,7 +183,7 @@ class PoissonOracle {
       return;
     }
 
-    ReductionControl solver_control(/*max_iter=*/50000, atol, rtol);
+    ReductionControl solver_control(50000, atol, rtol);
     PreconditionSSOR<SparseMatrix<double>> preconditioner;
     preconditioner.initialize(system_matrix_, 1.2);
 

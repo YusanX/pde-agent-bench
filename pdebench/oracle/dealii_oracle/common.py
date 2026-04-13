@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import subprocess
 import tempfile
@@ -605,6 +606,259 @@ def preprocess_case_spec(oracle_config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ============================================================================
+# 3b.  Complex domain mesh generation (Gmsh → .msh for deal.II GridIn)
+# ============================================================================
+
+#: Domain types handled by deal.II's built-in GridGenerator (no Gmsh needed).
+_BUILTIN_DOMAINS = frozenset({"unit_square", "unit_cube"})
+
+
+def generate_domain_mesh_file(
+    domain_spec: Dict[str, Any],
+    mesh_spec: Dict[str, Any],
+    output_path: "str | Path",
+) -> bool:
+    """Generate a Gmsh triangular mesh file (.msh) for a complex 2-D domain.
+
+    Returns True when a mesh file was written (complex domain).
+    Returns False for ``unit_square`` / ``unit_cube`` (handled by deal.II
+    ``GridGenerator`` internally – no file needed).
+
+    The output mesh uses MSH format (version 4.1).  All boundary curves are
+    tagged with physical-group id 1.  The C++ ``mesh_factory.h`` resets every
+    boundary face to ``boundary_id = 0`` after reading, so the existing BC
+    application code in each solver (which applies BCs on id 0) works unchanged.
+
+    Parameters
+    ----------
+    domain_spec : dict
+        The ``domain`` sub-dict from a benchmark oracle_config.
+    mesh_spec : dict
+        The ``mesh`` sub-dict (used to derive ``CharacteristicLengthMax``).
+    output_path : str or Path
+        Destination file path for the generated .msh file.
+    """
+    domain_type = domain_spec.get("type", "unit_square")
+    if domain_type in _BUILTIN_DOMAINS:
+        return False
+
+    try:
+        import gmsh  # noqa: PLC0415  (lazy import – gmsh optional dependency)
+    except ImportError as exc:
+        raise ImportError(
+            "The 'gmsh' Python package is required to generate meshes for "
+            "complex domains in the deal.II oracle.  Install it with:\n"
+            "    pip install gmsh"
+        ) from exc
+
+    resolution = mesh_spec.get("resolution", 16)
+    char_length = 1.0 / float(resolution)
+    params = domain_spec.get("geometry_params", {})
+
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Verbosity", 0)
+        gmsh.model.add("domain")
+        occ = gmsh.model.occ
+
+        surface_tags: list[int] = []
+
+        # ------------------------------------------------------------------ #
+        # Geometry construction                                                #
+        # ------------------------------------------------------------------ #
+        if domain_type == "l_shape":
+            verts = params.get(
+                "vertices",
+                [[0, 0], [1, 0], [1, 0.5], [0.5, 0.5], [0.5, 1], [0, 1]],
+            )
+            pt_tags = [occ.addPoint(v[0], v[1], 0) for v in verts]
+            n = len(pt_tags)
+            line_tags = [occ.addLine(pt_tags[i], pt_tags[(i + 1) % n]) for i in range(n)]
+            loop = occ.addCurveLoop(line_tags)
+            surface_tags = [occ.addPlaneSurface([loop])]
+
+        elif domain_type == "circle":
+            c = params.get("center", [0.5, 0.5])
+            r = params.get("radius", 0.5)
+            surface_tags = [occ.addDisk(c[0], c[1], 0, r, r)]
+
+        elif domain_type == "annulus":
+            c = params.get("center", [0.5, 0.5])
+            r_in = params.get("inner_r", 0.25)
+            r_out = params.get("outer_r", 0.5)
+            outer = occ.addDisk(c[0], c[1], 0, r_out, r_out)
+            inner = occ.addDisk(c[0], c[1], 0, r_in, r_in)
+            out_map, _ = occ.cut([(2, outer)], [(2, inner)])
+            surface_tags = [o[1] for o in out_map]
+
+        elif domain_type == "square_with_hole":
+            outer = params.get("outer", [0, 1, 0, 1])
+            rect = occ.addRectangle(
+                outer[0], outer[2], 0, outer[1] - outer[0], outer[3] - outer[2]
+            )
+            ih = params.get("inner_hole", {})
+            if ih.get("type") == "circle":
+                c2, r2 = ih.get("center", [0.5, 0.5]), ih.get("radius", 0.2)
+                hole = occ.addDisk(c2[0], c2[1], 0, r2, r2)
+            elif ih.get("type") == "rect":
+                b = ih.get("bbox", [0.4, 0.6, 0.4, 0.6])
+                hole = occ.addRectangle(b[0], b[2], 0, b[1] - b[0], b[3] - b[2])
+            else:  # polygon hole
+                hv = ih.get("vertices", [[0.4, 0.4], [0.6, 0.4], [0.5, 0.7]])
+                hpts = [occ.addPoint(p[0], p[1], 0) for p in hv]
+                hn = len(hpts)
+                hlines = [occ.addLine(hpts[i], hpts[(i + 1) % hn]) for i in range(hn)]
+                hloop = occ.addCurveLoop(hlines)
+                hole = occ.addPlaneSurface([hloop])
+            out_map, _ = occ.cut([(2, rect)], [(2, hole)])
+            surface_tags = [o[1] for o in out_map]
+
+        elif domain_type == "multi_hole":
+            outer = params.get("outer", [0, 1, 0, 1])
+            rect = occ.addRectangle(
+                outer[0], outer[2], 0, outer[1] - outer[0], outer[3] - outer[2]
+            )
+            hole_tags = []
+            for h in params.get("holes", []):
+                hc, hr = h.get("c", [0, 0]), h.get("r", 0.1)
+                hole_tags.append((2, occ.addDisk(hc[0], hc[1], 0, hr, hr)))
+            if hole_tags:
+                out_map, _ = occ.cut([(2, rect)], hole_tags)
+                surface_tags = [o[1] for o in out_map]
+            else:
+                surface_tags = [rect]
+
+        elif domain_type == "t_junction":
+            h = params.get("horizontal_rect", [0.0, 1.0, 0.4, 0.6])
+            v = params.get("vertical_rect", [0.4, 0.6, 0.0, 0.5])
+            r1 = occ.addRectangle(h[0], h[2], 0, h[1] - h[0], h[3] - h[2])
+            r2 = occ.addRectangle(v[0], v[2], 0, v[1] - v[0], v[3] - v[2])
+            out_map, _ = occ.fuse([(2, r1)], [(2, r2)])
+            surface_tags = [o[1] for o in out_map]
+
+        elif domain_type == "sector":
+            c = params.get("center", [0, 0])
+            r = params.get("radius", 1.0)
+            ang_deg = params.get("angle", 90)
+            ang = math.radians(ang_deg)
+            n_arc = max(20, int(ang_deg / 2))
+            arc_pts = [
+                occ.addPoint(c[0] + r * math.cos(i * ang / n_arc),
+                             c[1] + r * math.sin(i * ang / n_arc), 0)
+                for i in range(n_arc + 1)
+            ]
+            center_pt = occ.addPoint(c[0], c[1], 0)
+            line1 = occ.addLine(center_pt, arc_pts[0])
+            arc_lines = [occ.addLine(arc_pts[i], arc_pts[i + 1]) for i in range(n_arc)]
+            line2 = occ.addLine(arc_pts[-1], center_pt)
+            loop = occ.addCurveLoop([line1] + arc_lines + [line2])
+            surface_tags = [occ.addPlaneSurface([loop])]
+
+        elif domain_type in ("star", "star_shape"):
+            cx_c = params.get("center", [0, 0])
+            n_pts = params.get("points", 5)
+            r_in = params.get("inner_r", 0.3)
+            r_out = params.get("outer_r", 0.7)
+            verts = []
+            for i in range(2 * n_pts):
+                angle = i * math.pi / n_pts - math.pi / 2
+                ri = r_out if i % 2 == 0 else r_in
+                verts.append([cx_c[0] + ri * math.cos(angle),
+                               cx_c[1] + ri * math.sin(angle)])
+            pt_tags = [occ.addPoint(v[0], v[1], 0) for v in verts]
+            m = len(pt_tags)
+            line_tags = [occ.addLine(pt_tags[i], pt_tags[(i + 1) % m]) for i in range(m)]
+            loop = occ.addCurveLoop(line_tags)
+            surface_tags = [occ.addPlaneSurface([loop])]
+
+        elif domain_type == "gear":
+            c = params.get("center", [0, 0])
+            n_teeth = params.get("teeth", 8)
+            r_base = params.get("base_r", 0.5)
+            tooth_h = params.get("tooth_h", 0.2)
+            verts = []
+            for i in range(2 * n_teeth):
+                angle = i * math.pi / n_teeth
+                ri = r_base + tooth_h if i % 2 == 0 else r_base
+                verts.append([c[0] + ri * math.cos(angle), c[1] + ri * math.sin(angle)])
+            pt_tags = [occ.addPoint(v[0], v[1], 0) for v in verts]
+            m = len(pt_tags)
+            line_tags = [occ.addLine(pt_tags[i], pt_tags[(i + 1) % m]) for i in range(m)]
+            loop = occ.addCurveLoop(line_tags)
+            surface_tags = [occ.addPlaneSurface([loop])]
+
+        elif domain_type == "dumbbell":
+            # Dataset format: left_circle.{c,r}, right_circle.{c,r},
+            #                  bridge.{x_min,x_max,y_min,y_max}
+            lc_spec = params.get("left_circle",  {"c": [0.25, 0.5], "r": 0.25})
+            rc_spec = params.get("right_circle", {"c": [0.75, 0.5], "r": 0.25})
+            br = params.get("bridge", {"x_min": 0.25, "x_max": 0.75,
+                                        "y_min": 0.4,  "y_max": 0.6})
+            d1 = occ.addDisk(lc_spec["c"][0], lc_spec["c"][1], 0,
+                             lc_spec["r"], lc_spec["r"])
+            d2 = occ.addDisk(rc_spec["c"][0], rc_spec["c"][1], 0,
+                             rc_spec["r"], rc_spec["r"])
+            bar = occ.addRectangle(
+                br["x_min"], br["y_min"], 0,
+                br["x_max"] - br["x_min"], br["y_max"] - br["y_min"],
+            )
+            out_map, _ = occ.fuse([(2, d1), (2, d2)], [(2, bar)])
+            surface_tags = [o[1] for o in out_map]
+
+        elif domain_type == "eccentric_annulus":
+            outer = params.get("outer_circle", {"c": [0.5, 0.5], "r": 0.5})
+            inner = params.get("inner_circle", {"c": [0.65, 0.5], "r": 0.2})
+            d1 = occ.addDisk(outer["c"][0], outer["c"][1], 0, outer["r"], outer["r"])
+            d2 = occ.addDisk(inner["c"][0], inner["c"][1], 0, inner["r"], inner["r"])
+            out_map, _ = occ.cut([(2, d1)], [(2, d2)])
+            surface_tags = [o[1] for o in out_map]
+
+        elif domain_type == "periodic_square":
+            # Dataset uses "bounds": [xmin, xmax, ymin, ymax]
+            bounds = params.get("bounds", params.get("extents", [0.0, 1.0, 0.0, 1.0]))
+            rect = occ.addRectangle(
+                bounds[0], bounds[2], 0,
+                bounds[1] - bounds[0], bounds[3] - bounds[2],
+            )
+            surface_tags = [rect]
+
+        else:
+            raise ValueError(
+                f"dealii_oracle: unsupported complex domain type '{domain_type}'. "
+                f"Supported: l_shape, circle, annulus, square_with_hole, multi_hole, "
+                f"t_junction, sector, star, gear, dumbbell, eccentric_annulus, "
+                f"periodic_square."
+            )
+
+        occ.synchronize()
+
+        # Tag all boundary curves as physical group 1 and surfaces as group 1.
+        # In C++ mesh_factory.h we reset every boundary face to id=0 so that
+        # existing solver BC code (which always targets id=0) works unchanged.
+        all_boundary_curves: set[int] = set()
+        for stag in surface_tags:
+            for bnd in gmsh.model.getBoundary([(2, stag)], oriented=False):
+                all_boundary_curves.add(abs(bnd[1]))
+        if all_boundary_curves:
+            gmsh.model.addPhysicalGroup(1, sorted(all_boundary_curves), tag=1)
+        gmsh.model.addPhysicalGroup(2, surface_tags, tag=1)
+
+        # Mesh generation
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", char_length)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", char_length * 0.05)
+        gmsh.option.setNumber("Mesh.Algorithm", 6)   # Frontal-Delaunay (quality)
+        gmsh.model.mesh.generate(2)
+        gmsh.model.mesh.optimize("Netgen")
+
+        gmsh.write(str(output_path))
+
+    finally:
+        gmsh.finalize()
+
+    return True
+
+
+# ============================================================================
 # 4.  Build management
 # ============================================================================
 
@@ -715,7 +969,29 @@ def run_oracle_program(
         output_dir  = Path(tmpdir) / "output"
         output_dir.mkdir()
 
-        spec_file.write_text(json.dumps(case_spec))
+        # For complex domains, generate a Gmsh triangular mesh and inject the
+        # path as domain._mesh_file so the C++ solver can read it via GridIn.
+        enriched_spec = copy.deepcopy(case_spec)
+        domain_type = enriched_spec.get("domain", {}).get("type", "unit_square")
+        if domain_type not in _BUILTIN_DOMAINS:
+            mesh_file = Path(tmpdir) / "domain.msh"
+            try:
+                mesh_generated = generate_domain_mesh_file(
+                    enriched_spec.get("domain", {}),
+                    enriched_spec.get("mesh", {}),
+                    mesh_file,
+                )
+                if mesh_generated:
+                    enriched_spec.setdefault("domain", {})["_mesh_file"] = str(mesh_file)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"dealii_oracle: failed to generate mesh for domain "
+                    f"type '{domain_type}': {exc}"
+                ) from exc
+        else:
+            enriched_spec = enriched_spec  # no-op, already deepcopied
+
+        spec_file.write_text(json.dumps(enriched_spec))
 
         result = subprocess.run(
             [str(binary_path), str(spec_file), str(output_dir)],
