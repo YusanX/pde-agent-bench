@@ -545,3 +545,83 @@ def _laplacian_sym(u_sym: Any, coords: Tuple) -> Any:
 def _div_kappa_grad_sym(u_sym: Any, kappa_sym: Any, coords: Tuple) -> Any:
     """Return symbolic ∇·(κ ∇u) = ∑ ∂/∂xᵢ (κ ∂u/∂xᵢ)."""
     return sum(sp.diff(kappa_sym * sp.diff(u_sym, c), c) for c in coords)
+
+
+# =============================================================================
+# Direct exact-solution evaluation (bypasses FEM projection error)
+# =============================================================================
+
+def _eval_exact_sym_on_grid(
+    u_sym: Any,
+    spatial_coords: Tuple,
+    grid_cfg: Dict[str, Any],
+    t: float = None,
+    t_sym=None,
+) -> np.ndarray:
+    """Evaluate a sympy scalar expression directly on a 2-D uniform grid.
+
+    Uses numpy lambdify — no FEM projection, machine-precision accuracy.
+    Returns shape (ny, nx) with the same convention as _sample_scalar_grid:
+      result[j, i] = u(xs[i], ys[j])
+
+    Args:
+        u_sym:          sympy scalar expression.
+        spatial_coords: tuple of spatial sympy symbols (x_sym, y_sym[, z_sym]).
+        grid_cfg:       {'bbox': [x0,x1,y0,y1], 'nx': int, 'ny': int}.
+        t:              time value to substitute (transient problems only).
+        t_sym:          sympy time symbol corresponding to t.
+    """
+    bbox = grid_cfg["bbox"]
+    nx, ny = grid_cfg["nx"], grid_cfg["ny"]
+    xs = np.linspace(bbox[0], bbox[1], nx)
+    ys = np.linspace(bbox[2], bbox[3], ny)
+
+    # "xy" indexing → X[j,i]=xs[i], Y[j,i]=ys[j] → result shape (ny, nx)
+    X, Y = np.meshgrid(xs, ys, indexing="xy")
+
+    expr = u_sym.subs(t_sym, t) if (t is not None and t_sym is not None) else u_sym
+    u_func = sp.lambdify(spatial_coords, expr, modules="numpy")
+    result = u_func(X, Y)
+
+    if np.isscalar(result):
+        result = np.full((ny, nx), float(result))
+
+    return np.asarray(result, dtype=float)
+
+
+def _eval_exact_vec_mag_on_grid(
+    u_sym_vec: List,
+    spatial_coords: Tuple,
+    grid_cfg: Dict[str, Any],
+    t: float = None,
+    t_sym=None,
+) -> np.ndarray:
+    """Evaluate vector magnitude ‖u‖ = sqrt(∑ uᵢ²) directly on a 2-D uniform grid.
+
+    Used for vector-valued PDEs (Stokes, linear elasticity) where the benchmark
+    output field is the displacement/velocity magnitude.
+    Returns shape (ny, nx) matching _sample_vector_mag_grid convention.
+
+    Args:
+        u_sym_vec:      list of sympy scalar expressions [ux, uy[, uz]].
+        spatial_coords: tuple of spatial sympy symbols.
+        grid_cfg:       {'bbox': [x0,x1,y0,y1], 'nx': int, 'ny': int}.
+        t:              time value to substitute (transient problems only).
+        t_sym:          sympy time symbol corresponding to t.
+    """
+    bbox = grid_cfg["bbox"]
+    nx, ny = grid_cfg["nx"], grid_cfg["ny"]
+    xs = np.linspace(bbox[0], bbox[1], nx)
+    ys = np.linspace(bbox[2], bbox[3], ny)
+    X, Y = np.meshgrid(xs, ys, indexing="xy")
+
+    mag_sq = np.zeros((ny, nx), dtype=float)
+    for comp_sym in u_sym_vec:
+        expr = comp_sym.subs(t_sym, t) if (t is not None and t_sym is not None) else comp_sym
+        comp_func = sp.lambdify(spatial_coords, expr, modules="numpy")
+        vals = comp_func(X, Y)
+        if np.isscalar(vals):
+            vals = np.full((ny, nx), float(vals))
+        mag_sq += np.asarray(vals, dtype=float) ** 2
+
+    return np.sqrt(mag_sq)

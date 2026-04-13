@@ -24,6 +24,7 @@ from .common import (
     _mms_local_dict,
     _mms_coords,
     _laplacian_sym,
+    _eval_exact_sym_on_grid,
 )
 
 
@@ -128,7 +129,8 @@ class ConvectionDiffusionSolver:
                 "upwind_parameter": upwind_parameter,
             }
             if u_exact is not None:
-                u_exact_grid = _sample_scalar_grid(u_exact, grid_cfg)
+                # 直接在格点上代入解析式求精确值，避免 FEM 投影误差
+                u_exact_grid = _eval_exact_sym_on_grid(u_sym, tuple(coords), grid_cfg)
                 baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
                 u_grid = u_exact_grid
             else:
@@ -285,10 +287,10 @@ class ConvectionDiffusionSolver:
             "dt": dt,
         }
         if u_exact_expr is not None:
-            u_exact = fem.Function(V)
-            u_exact_expr_t = parse_expression(u_exact_expr, x, t=t)
-            interpolate_expression(u_exact, u_exact_expr_t)
-            u_exact_grid = _sample_scalar_grid(u_exact, grid_cfg)
+            # 直接在格点上代入解析式（t=t_end），避免 FEM 投影误差
+            u_exact_grid = _eval_exact_sym_on_grid(
+                u_exact_expr, tuple(coords), grid_cfg, t=t, t_sym=st
+            )
             baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
             u_grid = u_exact_grid
         else:

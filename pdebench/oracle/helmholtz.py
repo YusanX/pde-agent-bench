@@ -23,6 +23,7 @@ from .common import (
     _mms_local_dict,
     _mms_coords,
     _laplacian_sym,
+    _eval_exact_sym_on_grid,
 )
 
 
@@ -135,7 +136,8 @@ class HelmholtzSolver:
         }
 
         if u_exact is not None:
-            u_exact_grid = _sample_scalar_grid(u_exact, grid_cfg)
+            # 直接在格点上代入解析式求精确值，避免 FEM 投影误差
+            u_exact_grid = _eval_exact_sym_on_grid(u_sym, coords, grid_cfg)
             baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
             u_grid = u_exact_grid
         else:

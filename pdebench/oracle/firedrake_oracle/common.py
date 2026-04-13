@@ -13,6 +13,8 @@ Firedrake API differences from DOLFINx:
 from __future__ import annotations
 
 import math
+import os
+import tempfile
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
@@ -23,6 +25,8 @@ import sympy as sp
 from firedrake import (
     UnitSquareMesh,
     UnitCubeMesh,
+    Mesh,
+    PeriodicRectangleMesh,
     FunctionSpace,
     VectorFunctionSpace,
     MixedFunctionSpace,
@@ -73,14 +77,166 @@ from .._types import OracleResult, compute_rel_L2_grid
 
 
 # =============================================================================
+# Mesh creation helpers
+# =============================================================================
+
+def _build_pygmsh_mesh_file(domain_spec: Dict[str, Any], char_length: float) -> str:
+    """
+    使用 pygmsh 生成复杂几何网格，写成 gmsh v2 ASCII 格式 (.msh)，返回临时文件路径。
+    Firedrake 的 Mesh() 可直接读取 gmsh v2/v4 格式。
+
+    支持的 domain 类型：
+        l_shape, circle, annulus, square_with_hole, multi_hole,
+        t_junction, sector, star / star_shape, gear, dumbbell,
+        eccentric_annulus, periodic_square
+    """
+    import pygmsh
+    import meshio
+    import gmsh
+
+    domain_type = domain_spec["type"]
+    params = domain_spec.get("geometry_params", {})
+
+    with pygmsh.occ.Geometry() as geom:
+        gmsh.option.setNumber("General.Verbosity", 0)
+        geom.characteristic_length_max = char_length
+
+        if domain_type == "l_shape":
+            v = params.get("vertices", [[0, 0], [1, 0], [1, 0.5], [0.5, 0.5], [0.5, 1], [0, 1]])
+            geom.add_polygon([[p[0], p[1], 0] for p in v])
+
+        elif domain_type == "circle":
+            c, r = params.get("center", [0.5, 0.5]), params.get("radius", 0.5)
+            geom.add_disk([c[0], c[1], 0], r)
+
+        elif domain_type == "annulus":
+            c = params.get("center", [0, 0])
+            r_in = params.get("inner_r", 0.5)
+            r_out = params.get("outer_r", 1.0)
+            d1 = geom.add_disk([c[0], c[1], 0], r_out)
+            d2 = geom.add_disk([c[0], c[1], 0], r_in)
+            geom.boolean_difference(d1, d2)
+
+        elif domain_type in ("square_with_hole", "multi_hole"):
+            out = params.get("outer", [0, 1, 0, 1])
+            rect = geom.add_rectangle([out[0], out[2], 0], out[1] - out[0], out[3] - out[2])
+            if domain_type == "square_with_hole":
+                ih = params.get("inner_hole", {})
+                if ih.get("type") == "circle":
+                    c, r = ih.get("center", [0.5, 0.5]), ih.get("radius", 0.2)
+                    hole = geom.add_disk([c[0], c[1], 0], r)
+                elif ih.get("type") == "rect":
+                    b = ih.get("bbox", [0.4, 0.6, 0.4, 0.6])
+                    hole = geom.add_rectangle([b[0], b[2], 0], b[1] - b[0], b[3] - b[2])
+                else:
+                    v = ih.get("vertices", [[0.4, 0.4], [0.6, 0.4], [0.5, 0.7]])
+                    hole = geom.add_polygon([[p[0], p[1], 0] for p in v])
+                geom.boolean_difference(rect, hole)
+            else:  # multi_hole
+                holes = []
+                for h in params.get("holes", []):
+                    c, r = h.get("c", [0, 0]), h.get("r", 0.1)
+                    holes.append(geom.add_disk([c[0], c[1], 0], r))
+                geom.boolean_difference(rect, holes)
+
+        elif domain_type == "t_junction":
+            h = params.get("horizontal_rect", [0.0, 1.0, 0.4, 0.6])
+            v = params.get("vertical_rect", [0.4, 0.6, 0.0, 0.5])
+            r1 = geom.add_rectangle([h[0], h[2], 0], h[1] - h[0], h[3] - h[2])
+            r2 = geom.add_rectangle([v[0], v[2], 0], v[1] - v[0], v[3] - v[2])
+            geom.boolean_union([r1, r2])
+
+        elif domain_type == "sector":
+            c, r = params.get("center", [0, 0]), params.get("radius", 1.0)
+            ang = math.radians(params.get("angle", 90))
+            pts = [[c[0], c[1], 0]]
+            for a in np.linspace(0, ang, 15):
+                pts.append([c[0] + r * math.cos(a), c[1] + r * math.sin(a), 0])
+            geom.add_polygon(pts)
+
+        elif domain_type in ("star", "star_shape"):
+            n = params.get("points", 5)
+            r_in = params.get("inner_r", 0.3)
+            r_out = params.get("outer_r", 0.7)
+            pts = []
+            for i in range(2 * n):
+                angle = i * math.pi / n - math.pi / 2
+                r = r_out if i % 2 == 0 else r_in
+                pts.append([r * math.cos(angle), r * math.sin(angle), 0])
+            geom.add_polygon(pts)
+
+        elif domain_type == "gear":
+            n = params.get("teeth", 8)
+            r_base = params.get("base_r", 0.5)
+            h = params.get("tooth_h", 0.2)
+            pts = []
+            for i in range(2 * n):
+                angle = i * math.pi / n
+                r = r_base + h if i % 2 == 0 else r_base
+                pts.append([r * math.cos(angle), r * math.sin(angle), 0])
+            geom.add_polygon(pts)
+
+        elif domain_type == "dumbbell":
+            w = params.get("bar_width", 0.2)
+            c1 = params.get("left_center", [0.2, 0.5])
+            c2 = params.get("right_center", [0.8, 0.5])
+            r = params.get("radius", 0.2)
+            d1 = geom.add_disk([c1[0], c1[1], 0], r)
+            d2 = geom.add_disk([c2[0], c2[1], 0], r)
+            bar = geom.add_rectangle([c1[0], 0.5 - w / 2, 0], c2[0] - c1[0], w)
+            geom.boolean_union([d1, d2, bar])
+
+        elif domain_type == "eccentric_annulus":
+            outer = params.get("outer_circle", {"c": [0, 0], "r": 1.0})
+            inner = params.get("inner_circle", {"c": [0.2, 0], "r": 0.4})
+            oc, o_r = outer["c"], outer["r"]
+            ic, i_r = inner["c"], inner["r"]
+            d1 = geom.add_disk([oc[0], oc[1], 0], o_r)
+            d2 = geom.add_disk([ic[0], ic[1], 0], i_r)
+            geom.boolean_difference(d1, d2)
+
+        elif domain_type == "periodic_square":
+            out = params.get("extents", [0.0, 1.0, 0.0, 1.0])
+            geom.add_rectangle([out[0], out[2], 0], out[1] - out[0], out[3] - out[2])
+
+        else:
+            raise ValueError(f"Unsupported domain type for Firedrake: {domain_type}")
+
+        mesh_data = geom.generate_mesh()
+
+    # 提取 2D 三角形网格并写成 gmsh v2 ASCII 格式（Firedrake 兼容）
+    pts = mesh_data.points[:, :2]
+    triangles = mesh_data.cells_dict.get("triangle")
+    if triangles is None:
+        raise RuntimeError(
+            f"pygmsh generated no triangle cells for domain type '{domain_type}'. "
+            "Check geometry parameters."
+        )
+    out_mesh = meshio.Mesh(points=pts, cells={"triangle": triangles})
+
+    fd, tmp_path = tempfile.mkstemp(suffix=".msh", prefix="firedrake_mesh_")
+    os.close(fd)
+    meshio.write(tmp_path, out_mesh, file_format="gmsh22")
+    return tmp_path
+
+
+# =============================================================================
 # Mesh creation
 # =============================================================================
 
 def create_mesh(domain_spec: Dict[str, Any], mesh_spec: Dict[str, Any]):
-    """Create a Firedrake mesh from domain/mesh configuration."""
+    """Create a Firedrake mesh from domain/mesh configuration.
+
+    Supports all domain types in benchmark_v2.jsonl:
+      unit_square, unit_cube  – built-in Firedrake meshes
+      periodic_square         – PeriodicRectangleMesh (geometry identical to unit_square,
+                                periodic pairing handled at function-space level)
+      everything else         – pygmsh + gmsh v2 .msh file → Mesh()
+    """
     domain_type = domain_spec["type"]
     resolution = mesh_spec["resolution"]
     cell_type = mesh_spec.get("cell_type", "triangle")
+    char_length = 1.0 / float(resolution)
 
     if domain_type == "unit_square":
         quad = (cell_type == "quadrilateral")
@@ -90,7 +246,35 @@ def create_mesh(domain_spec: Dict[str, Any], mesh_spec: Dict[str, Any]):
         hexahedral = (cell_type == "hexahedron")
         return UnitCubeMesh(resolution, resolution, resolution, hexahedral=hexahedral)
 
-    raise ValueError(f"Unsupported domain type for Firedrake: {domain_type}")
+    if domain_type == "periodic_square":
+        # Firedrake 的周期性网格需要专门的 PeriodicRectangleMesh。
+        # 几何形状与 unit_square 相同；周期性配对由 Firedrake 内核处理。
+        params = domain_spec.get("geometry_params", {})
+        extents = params.get("extents", [0.0, 1.0, 0.0, 1.0])
+        Lx = extents[1] - extents[0]
+        Ly = extents[3] - extents[2]
+        direction = params.get("direction", "both")
+        if direction == "x":
+            return PeriodicRectangleMesh(resolution, resolution, Lx, Ly,
+                                         direction="x", quadrilateral=(cell_type == "quadrilateral"))
+        elif direction == "y":
+            return PeriodicRectangleMesh(resolution, resolution, Lx, Ly,
+                                         direction="y", quadrilateral=(cell_type == "quadrilateral"))
+        else:  # "both"
+            return PeriodicRectangleMesh(resolution, resolution, Lx, Ly,
+                                         quadrilateral=(cell_type == "quadrilateral"))
+
+    # 复杂几何：通过 pygmsh 生成 .msh，Firedrake 的 Mesh() 直接加载
+    msh_file = _build_pygmsh_mesh_file(domain_spec, char_length)
+    try:
+        msh = Mesh(msh_file)
+    finally:
+        # Firedrake 在 Mesh() 返回时已将网格读入内存，临时文件可立即删除
+        try:
+            os.remove(msh_file)
+        except OSError:
+            pass
+    return msh
 
 
 # =============================================================================
@@ -281,46 +465,125 @@ def _is_3d_grid(bbox: List[float], nz: Optional[int] = None) -> bool:
     return len(bbox) == 6 and nz is not None
 
 
+def _at_scalar_safe(u_h: Function, coords: np.ndarray) -> np.ndarray:
+    """Evaluate a scalar Function at coords, returning 0.0 for out-of-domain points.
+
+    Uses ``dont_raise=True`` so Firedrake returns None instead of raising
+    PointNotInDomainError for points outside non-convex / irregular meshes
+    (e.g. l_shape, annulus, dumbbell …).
+
+    Out-of-domain points are filled with 0.0, matching the DOLFINx oracle
+    convention (nan_to_num(nan=0.0) after MPI reduction).
+    """
+    raw = u_h.at(coords, dont_raise=True)
+    return np.array(
+        [float(v) if v is not None else 0.0 for v in raw],
+        dtype=float,
+    )
+
+
+def _at_vector_mag_safe(u_h: Function, coords: np.ndarray) -> np.ndarray:
+    """Evaluate ||u|| at coords, returning 0.0 for out-of-domain points."""
+    raw = u_h.at(coords, dont_raise=True)
+    result = np.empty(len(raw), dtype=float)
+    for i, v in enumerate(raw):
+        if v is None:
+            result[i] = 0.0
+        else:
+            arr = np.asarray(v, dtype=float)
+            result[i] = float(np.linalg.norm(arr)) if arr.ndim > 0 else float(abs(arr))
+    return result
+
+
 def sample_scalar_on_grid(
     u_h: Function, bbox: List[float], nx: int, ny: int, nz: Optional[int] = None
 ) -> Tuple[np.ndarray, ...]:
     """Sample a scalar Function on a uniform grid.
 
-    Uses ``Function.at(coords)`` which is guaranteed to return values in the
-    same order as the input coordinates, avoiding the VertexOnlyMesh internal
-    reordering issue that corrupts grid-point values.
+    Uses ``Function.at(coords, dont_raise=True)`` so points that fall outside
+    the mesh (common for non-rectangular domains like l_shape, annulus …) are
+    filled with NaN instead of raising PointNotInDomainError.
     """
     if _is_3d_grid(bbox, nz):
         x_lin, y_lin, z_lin, coords, shape = _make_grid_coords_3d(bbox, nx, ny, int(nz))
-        values = np.array(u_h.at(coords))
+        values = _at_scalar_safe(u_h, coords)
         return x_lin, y_lin, z_lin, values.reshape(shape)
 
     x_lin, y_lin, coords, shape = _make_grid_coords(bbox, nx, ny)
-    values = np.array(u_h.at(coords))   # shape (ny*nx,), input-order guaranteed
+    values = _at_scalar_safe(u_h, coords)
     return x_lin, y_lin, values.reshape(shape)
 
 
 def sample_vector_magnitude_on_grid(
     u_h: Function, bbox: List[float], nx: int, ny: int, nz: Optional[int] = None
 ) -> Tuple[np.ndarray, ...]:
-    """Sample ||u|| of a vector Function on a uniform grid."""
+    """Sample ||u|| of a vector Function on a uniform grid.
+
+    Out-of-domain points are filled with NaN.
+    """
     if _is_3d_grid(bbox, nz):
         x_lin, y_lin, z_lin, coords, shape = _make_grid_coords_3d(bbox, nx, ny, int(nz))
-        vals = np.array(u_h.at(coords))
-        if vals.ndim == 1:
-            magnitudes = np.abs(vals)
-        else:
-            magnitudes = np.linalg.norm(vals, axis=1)
+        magnitudes = _at_vector_mag_safe(u_h, coords)
         return x_lin, y_lin, z_lin, magnitudes.reshape(shape)
 
     x_lin, y_lin, coords, shape = _make_grid_coords(bbox, nx, ny)
-    vals = np.array(u_h.at(coords))   # shape (ny*nx, gdim), input-order guaranteed
-    if vals.ndim == 1:
-        # scalar-valued vector space with dim=1
-        magnitudes = np.abs(vals)
-    else:
-        magnitudes = np.linalg.norm(vals, axis=1)
+    magnitudes = _at_vector_mag_safe(u_h, coords)
     return x_lin, y_lin, magnitudes.reshape(shape)
+
+
+def _eval_exact_sym_on_grid(
+    u_sym,
+    spatial_coords: Tuple,
+    grid_cfg: Dict[str, Any],
+    t: float = None,
+    t_sym=None,
+) -> np.ndarray:
+    """Evaluate a sympy scalar expression directly on a 2-D uniform grid.
+
+    Uses numpy lambdify — no FEM projection, machine-precision accuracy.
+    Returns shape (ny, nx) matching the sample_scalar_on_grid convention.
+    """
+    bbox = grid_cfg["bbox"]
+    nx, ny = int(grid_cfg["nx"]), int(grid_cfg["ny"])
+    xs = np.linspace(bbox[0], bbox[1], nx)
+    ys = np.linspace(bbox[2], bbox[3], ny)
+    X, Y = np.meshgrid(xs, ys, indexing="xy")
+
+    expr = u_sym.subs(t_sym, t) if (t is not None and t_sym is not None) else u_sym
+    u_func = sp.lambdify(spatial_coords, expr, modules="numpy")
+    result = u_func(X, Y)
+
+    if np.isscalar(result):
+        result = np.full((ny, nx), float(result))
+    return np.asarray(result, dtype=float)
+
+
+def _eval_exact_vec_mag_on_grid(
+    u_sym_vec: List,
+    spatial_coords: Tuple,
+    grid_cfg: Dict[str, Any],
+    t: float = None,
+    t_sym=None,
+) -> np.ndarray:
+    """Evaluate vector magnitude sqrt(sum(ui^2)) directly on a 2-D uniform grid.
+
+    Returns shape (ny, nx) matching sample_vector_magnitude_on_grid convention.
+    """
+    bbox = grid_cfg["bbox"]
+    nx, ny = int(grid_cfg["nx"]), int(grid_cfg["ny"])
+    xs = np.linspace(bbox[0], bbox[1], nx)
+    ys = np.linspace(bbox[2], bbox[3], ny)
+    X, Y = np.meshgrid(xs, ys, indexing="xy")
+
+    mag_sq = np.zeros((ny, nx), dtype=float)
+    for comp_sym in u_sym_vec:
+        expr = comp_sym.subs(t_sym, t) if (t is not None and t_sym is not None) else comp_sym
+        comp_func = sp.lambdify(spatial_coords, expr, modules="numpy")
+        vals = comp_func(X, Y)
+        if np.isscalar(vals):
+            vals = np.full((ny, nx), float(vals))
+        mag_sq += np.asarray(vals, dtype=float) ** 2
+    return np.sqrt(mag_sq)
 
 
 # =============================================================================

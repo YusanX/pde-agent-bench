@@ -40,6 +40,7 @@ from .common import (
     _sample_vector_mag_grid,
     _mms_local_dict,
     _mms_coords,
+    _eval_exact_vec_mag_on_grid,
 )
 
 
@@ -273,7 +274,10 @@ class LinearElasticitySolver:
         }
 
         if u_exact is not None:
-            u_exact_mag = _sample_vector_mag_grid(u_exact, grid_cfg)
+            # 直接在格点上计算位移模长，避免 FEM 投影误差
+            u_exact_mag = _eval_exact_vec_mag_on_grid(
+                u_comps, coords, grid_cfg
+            )
             baseline_error = compute_rel_L2_grid(u_mag, u_exact_mag)
             u_mag = u_exact_mag
         else:

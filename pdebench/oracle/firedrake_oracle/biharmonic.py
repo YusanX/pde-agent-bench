@@ -18,6 +18,7 @@ from .common import (
     build_scalar_bc,
     sample_scalar_on_grid,
     _scalar_solver_params,
+    _eval_exact_sym_on_grid,
 )
 
 
@@ -89,9 +90,7 @@ class FiredrakeBiharmonicSolver:
 
         baseline_error = 0.0
         if u_exact_fn is not None:
-            _, _, u_exact_grid = sample_scalar_on_grid(
-                u_exact_fn, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-            )
+            u_exact_grid = _eval_exact_sym_on_grid(u_sym, (sx, sy), grid_cfg)
             baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
             u_grid = u_exact_grid
         else:

@@ -32,6 +32,7 @@ from .common import (
     interpolate_expression,
     parse_expression,
     sample_scalar_on_grid,
+    _eval_exact_sym_on_grid,
 )
 
 
@@ -159,9 +160,9 @@ class BiharmonicSolver:
         }
 
         if u_exact is not None:
-            _, _, u_exact_grid = sample_scalar_on_grid(
-                u_exact, grid_cfg["bbox"], grid_cfg["nx"], grid_cfg["ny"]
-            )
+            # 直接在格点上代入解析式求精确值，避免 FEM 投影误差
+            sx, sy = sp.symbols("x y", real=True)
+            u_exact_grid = _eval_exact_sym_on_grid(u_sym, (sx, sy), grid_cfg)
             baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
             u_grid = u_exact_grid
         else:

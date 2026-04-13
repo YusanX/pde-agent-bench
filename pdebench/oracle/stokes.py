@@ -21,6 +21,7 @@ from .common import (
     parse_vector_expression,
     sample_vector_magnitude_on_grid,
     _sample_vector_mag_grid,
+    _eval_exact_vec_mag_on_grid,
 )
 
 
@@ -269,7 +270,12 @@ class StokesSolver:
 
         baseline_error = 0.0
         if u_exact is not None:
-            u_exact_grid = _sample_vector_mag_grid(u_exact, grid_cfg)
+            # 直接在格点上计算速度模长，避免 FEM 投影误差
+            sx, sy, sz = sp.symbols("x y z", real=True)
+            coords_sym = [sx, sy, sz][:dim]
+            u_exact_grid = _eval_exact_vec_mag_on_grid(
+                u_sym_vec, tuple(coords_sym), grid_cfg
+            )
             baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
             u_grid = u_exact_grid
         else:
