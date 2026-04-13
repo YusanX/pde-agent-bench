@@ -37,6 +37,7 @@ from .common import (
     parse_expression,
     sample_scalar_on_grid,
     _eval_exact_sym_on_grid,
+    _apply_domain_mask,
 )
 
 
@@ -257,8 +258,9 @@ class ReactionDiffusionSolver:
             if u_exact is not None:
                 # 直接在格点上代入解析式求精确值（稳态），避免 FEM 投影误差
                 sx, sy = sp.symbols("x y", real=True)
-                u_exact_grid = _eval_exact_sym_on_grid(
-                    u_exact_expr_sympy, (sx, sy), grid_cfg
+                u_exact_grid = _apply_domain_mask(
+                    u_grid,
+                    _eval_exact_sym_on_grid(u_exact_expr_sympy, (sx, sy), grid_cfg),
                 )
                 baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
                 u_grid = u_exact_grid
@@ -407,8 +409,9 @@ class ReactionDiffusionSolver:
         if u_exact_expr_sympy is not None:
             # 直接在格点上代入解析式（t=t_end），避免 FEM 投影误差
             sx, sy, st = sp.symbols("x y t", real=True)
-            u_exact_grid = _eval_exact_sym_on_grid(
-                u_exact_expr_sympy, (sx, sy), grid_cfg, t=t_end, t_sym=st
+            u_exact_grid = _apply_domain_mask(
+                u_grid,
+                _eval_exact_sym_on_grid(u_exact_expr_sympy, (sx, sy), grid_cfg, t=t_end, t_sym=st),
             )
             baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
             u_grid = u_exact_grid

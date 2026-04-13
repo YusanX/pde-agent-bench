@@ -340,15 +340,23 @@ def _eval_on_grid(msh: mesh.Mesh, eval_fn, bbox: List[float], nx: int, ny: int):
         values_eval = eval_fn(np.array(points_on_proc), np.array(cells_on_proc))
         local_values[eval_map] = values_eval.flatten()
 
-    # 并行聚合：收集所有进程的数据
-    total_values = np.zeros_like(local_values)
-    # 用 MPI_MAX 因为有值的点是非 nan，没值的点是 nan (处理 NaN 需要谨慎，这里简化逻辑)
-    # 更稳妥的做法是先用 0，最后再处理
+    # 追踪哪些点在域内（有有效 FEM 值）
+    local_has_value = np.zeros(points.shape[0], dtype=np.int32)
+    if eval_map:
+        local_has_value[eval_map] = 1
+
     local_values_zero = np.nan_to_num(local_values, nan=0.0)
+    total_values = np.zeros_like(local_values_zero)
     msh.comm.Reduce(local_values_zero, total_values, op=MPI.SUM, root=0)
 
+    total_has_value = np.zeros(points.shape[0], dtype=np.int32)
+    msh.comm.Reduce(local_has_value, total_has_value, op=MPI.SUM, root=0)
+
     if msh.comm.rank == 0:
-        return x_grid, y_grid, total_values.reshape(ny, nx)
+        result = total_values.reshape(ny, nx).astype(float)
+        # 域外点（所有进程均无对应网格单元）恢复为 NaN，供误差计算时掩蔽
+        result[total_has_value.reshape(ny, nx) == 0] = np.nan
+        return x_grid, y_grid, result
     else:
         return x_grid, y_grid, None
 def sample_scalar_on_grid(
@@ -444,12 +452,21 @@ def _eval_on_grid_3d(
         values_eval = eval_fn(np.array(points_on_proc), np.array(cells_on_proc))
         local_values[eval_map] = values_eval.flatten()
 
+    local_has_value = np.zeros(points.shape[0], dtype=np.int32)
+    if eval_map:
+        local_has_value[eval_map] = 1
+
     local_values_zero = np.nan_to_num(local_values, nan=0.0)
     total_values = np.zeros_like(local_values_zero)
     msh.comm.Reduce(local_values_zero, total_values, op=MPI.SUM, root=0)
 
+    total_has_value = np.zeros(points.shape[0], dtype=np.int32)
+    msh.comm.Reduce(local_has_value, total_has_value, op=MPI.SUM, root=0)
+
     if msh.comm.rank == 0:
-        return x_grid, y_grid, z_grid, total_values.reshape(nz, ny, nx)
+        result = total_values.reshape(nz, ny, nx).astype(float)
+        result[total_has_value.reshape(nz, ny, nx) == 0] = np.nan
+        return x_grid, y_grid, z_grid, result
     else:
         return x_grid, y_grid, z_grid, None
 
@@ -558,35 +575,74 @@ def _eval_exact_sym_on_grid(
     t: float = None,
     t_sym=None,
 ) -> np.ndarray:
-    """Evaluate a sympy scalar expression directly on a 2-D uniform grid.
+    """Evaluate a sympy scalar expression directly on a 2-D or 3-D uniform grid.
 
     Uses numpy lambdify — no FEM projection, machine-precision accuracy.
-    Returns shape (ny, nx) with the same convention as _sample_scalar_grid:
-      result[j, i] = u(xs[i], ys[j])
+
+    2-D: returns shape (ny, nx),  result[j, i]    = u(xs[i], ys[j])
+    3-D: returns shape (nz, ny, nx), result[k,j,i] = u(xs[i], ys[j], zs[k])
 
     Args:
         u_sym:          sympy scalar expression.
         spatial_coords: tuple of spatial sympy symbols (x_sym, y_sym[, z_sym]).
-        grid_cfg:       {'bbox': [x0,x1,y0,y1], 'nx': int, 'ny': int}.
+        grid_cfg:       bbox=[x0,x1,y0,y1[,z0,z1]], nx, ny[, nz].
         t:              time value to substitute (transient problems only).
         t_sym:          sympy time symbol corresponding to t.
     """
     bbox = grid_cfg["bbox"]
     nx, ny = grid_cfg["nx"], grid_cfg["ny"]
-    xs = np.linspace(bbox[0], bbox[1], nx)
-    ys = np.linspace(bbox[2], bbox[3], ny)
-
-    # "xy" indexing → X[j,i]=xs[i], Y[j,i]=ys[j] → result shape (ny, nx)
-    X, Y = np.meshgrid(xs, ys, indexing="xy")
+    is_3d = len(bbox) == 6 and "nz" in grid_cfg
 
     expr = u_sym.subs(t_sym, t) if (t is not None and t_sym is not None) else u_sym
     u_func = sp.lambdify(spatial_coords, expr, modules="numpy")
-    result = u_func(X, Y)
 
-    if np.isscalar(result):
-        result = np.full((ny, nx), float(result))
+    if is_3d:
+        nz = grid_cfg["nz"]
+        xs = np.linspace(bbox[0], bbox[1], nx)
+        ys = np.linspace(bbox[2], bbox[3], ny)
+        zs = np.linspace(bbox[4], bbox[5], nz)
+        # "ij" indexing → X[ix,iy,iz]=xs[ix], Y[..]=ys[iy], Z[..]=zs[iz]
+        # result_ij[ix,iy,iz] = u(xs[ix], ys[iy], zs[iz])
+        X, Y, Z = np.meshgrid(xs, ys, zs, indexing="ij")
+        result = u_func(X, Y, Z)
+        if np.isscalar(result):
+            result = np.full((nx, ny, nz), float(result))
+        # Transpose to (nz, ny, nx) to match _sample_scalar_grid 3D convention
+        return np.asarray(result, dtype=float).transpose(2, 1, 0)
+    else:
+        xs = np.linspace(bbox[0], bbox[1], nx)
+        ys = np.linspace(bbox[2], bbox[3], ny)
+        # "xy" indexing → X[j,i]=xs[i], Y[j,i]=ys[j] → result shape (ny, nx)
+        X, Y = np.meshgrid(xs, ys, indexing="xy")
+        result = u_func(X, Y)
+        if np.isscalar(result):
+            result = np.full((ny, nx), float(result))
+        return np.asarray(result, dtype=float)
 
-    return np.asarray(result, dtype=float)
+
+def _apply_domain_mask(
+    u_fem_grid: Optional[np.ndarray],
+    u_exact_grid: np.ndarray,
+) -> np.ndarray:
+    """将 FEM 采样的域内掩码应用到精确解网格。
+
+    `_eval_on_grid` 修复后，FEM 网格中域外点为 NaN。
+    将相同的 NaN 位置传播到精确解，使误差计算只覆盖域内点。
+
+    对简单（矩形）域无域外点时为空操作，不影响现有结果。
+
+    Args:
+        u_fem_grid:   FEM 解在网格上的采样（域外为 NaN），可为 None。
+        u_exact_grid: 精确解在完整网格上的计算结果（全域有值）。
+
+    Returns:
+        域外点设为 NaN 的精确解（与 u_fem_grid 同形状）。
+    """
+    if u_fem_grid is None or not np.any(np.isnan(u_fem_grid)):
+        return u_exact_grid
+    masked = u_exact_grid.copy()
+    masked[np.isnan(u_fem_grid)] = np.nan
+    return masked
 
 
 def _eval_exact_vec_mag_on_grid(
@@ -596,32 +652,49 @@ def _eval_exact_vec_mag_on_grid(
     t: float = None,
     t_sym=None,
 ) -> np.ndarray:
-    """Evaluate vector magnitude ‖u‖ = sqrt(∑ uᵢ²) directly on a 2-D uniform grid.
+    """Evaluate vector magnitude ‖u‖ = sqrt(∑ uᵢ²) directly on a 2-D or 3-D grid.
 
-    Used for vector-valued PDEs (Stokes, linear elasticity) where the benchmark
-    output field is the displacement/velocity magnitude.
-    Returns shape (ny, nx) matching _sample_vector_mag_grid convention.
+    Used for vector-valued PDEs (Stokes, linear elasticity).
+    2-D: returns shape (ny, nx).
+    3-D: returns shape (nz, ny, nx).
 
     Args:
         u_sym_vec:      list of sympy scalar expressions [ux, uy[, uz]].
         spatial_coords: tuple of spatial sympy symbols.
-        grid_cfg:       {'bbox': [x0,x1,y0,y1], 'nx': int, 'ny': int}.
+        grid_cfg:       bbox=[x0,x1,y0,y1[,z0,z1]], nx, ny[, nz].
         t:              time value to substitute (transient problems only).
         t_sym:          sympy time symbol corresponding to t.
     """
     bbox = grid_cfg["bbox"]
     nx, ny = grid_cfg["nx"], grid_cfg["ny"]
-    xs = np.linspace(bbox[0], bbox[1], nx)
-    ys = np.linspace(bbox[2], bbox[3], ny)
-    X, Y = np.meshgrid(xs, ys, indexing="xy")
+    is_3d = len(bbox) == 6 and "nz" in grid_cfg
 
-    mag_sq = np.zeros((ny, nx), dtype=float)
-    for comp_sym in u_sym_vec:
-        expr = comp_sym.subs(t_sym, t) if (t is not None and t_sym is not None) else comp_sym
-        comp_func = sp.lambdify(spatial_coords, expr, modules="numpy")
-        vals = comp_func(X, Y)
-        if np.isscalar(vals):
-            vals = np.full((ny, nx), float(vals))
-        mag_sq += np.asarray(vals, dtype=float) ** 2
-
-    return np.sqrt(mag_sq)
+    if is_3d:
+        nz = grid_cfg["nz"]
+        xs = np.linspace(bbox[0], bbox[1], nx)
+        ys = np.linspace(bbox[2], bbox[3], ny)
+        zs = np.linspace(bbox[4], bbox[5], nz)
+        X, Y, Z = np.meshgrid(xs, ys, zs, indexing="ij")
+        mag_sq = np.zeros((nx, ny, nz), dtype=float)
+        for comp_sym in u_sym_vec:
+            expr = comp_sym.subs(t_sym, t) if (t is not None and t_sym is not None) else comp_sym
+            comp_func = sp.lambdify(spatial_coords, expr, modules="numpy")
+            vals = comp_func(X, Y, Z)
+            if np.isscalar(vals):
+                vals = np.full((nx, ny, nz), float(vals))
+            mag_sq += np.asarray(vals, dtype=float) ** 2
+        # Transpose (nx,ny,nz) → (nz,ny,nx) to match _sample_vector_mag_grid 3D convention
+        return np.sqrt(mag_sq).transpose(2, 1, 0)
+    else:
+        xs = np.linspace(bbox[0], bbox[1], nx)
+        ys = np.linspace(bbox[2], bbox[3], ny)
+        X, Y = np.meshgrid(xs, ys, indexing="xy")
+        mag_sq = np.zeros((ny, nx), dtype=float)
+        for comp_sym in u_sym_vec:
+            expr = comp_sym.subs(t_sym, t) if (t is not None and t_sym is not None) else comp_sym
+            comp_func = sp.lambdify(spatial_coords, expr, modules="numpy")
+            vals = comp_func(X, Y)
+            if np.isscalar(vals):
+                vals = np.full((ny, nx), float(vals))
+            mag_sq += np.asarray(vals, dtype=float) ** 2
+        return np.sqrt(mag_sq)

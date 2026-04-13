@@ -2,23 +2,27 @@
 /**
  * grid_writer.h
  *
- * Samples a scalar deal.II FE solution on a uniform 2-D or 3-D grid and writes:
+ * Samples a scalar or vector deal.II FE solution on a uniform 2-D or 3-D
+ * output grid and writes:
  *
  *   {outdir}/solution_grid.bin   – raw float64, C-order [ny, nx] or [nz, ny, nx]
  *   {outdir}/meta.json           – nx, ny, [nz], num_dofs, baseline_time, …
  *
- * Python reads the binary as:
- *   grid = np.fromfile("solution_grid.bin", dtype=np.float64).reshape(ny, nx)
- *   # or reshape(nz, ny, nx) for 3-D
- *
  * Grid ordering convention (matches Firedrake oracle and DOLFINx oracle):
  *   grid[j, i] = u( x_lin[i], y_lin[j] )
- *   x_lin = linspace(xmin, xmax, nx)
- *   y_lin = linspace(ymin, ymax, ny)
- *   → outer loop over j (y), inner loop over i (x), i.e. row-major.
  *
- * For vector fields (Stokes velocity), a separate write_vector_grid() is
- * provided that writes |u| (magnitude) in the same format.
+ * Evaluation strategy (chosen at run-time based on mesh cell type):
+ *
+ *   Hypercube meshes (FE_Q, unit square/cube):
+ *     Uses FEFieldFunction::value_list for fast batch evaluation.
+ *     All output grid points lie inside the bbox = domain, so no exception.
+ *
+ *   Simplex meshes (FE_SimplexP, complex 2-D domains from Gmsh):
+ *     Uses VectorTools::point_value with MappingFE (correct simplex mapping)
+ *     in a per-point loop with try-catch.
+ *     Points outside the domain (bbox corners outside the L-shape, T-shape,
+ *     etc.) catch the exception and are set to 0.0, matching the DOLFINx
+ *     oracle's nan_to_num convention.
  */
 
 #include <cmath>
@@ -26,13 +30,15 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
-#include <type_traits>
 #include <vector>
 
 #include <deal.II/base/point.h>
 #include <deal.II/dofs/dof_handler.h>
+#include <deal.II/fe/fe_simplex_p.h>
+#include <deal.II/fe/mapping_fe.h>
 #include <deal.II/lac/vector.h>
 #include <deal.II/numerics/fe_field_function.h>
+#include <deal.II/numerics/vector_tools.h>
 
 #include <nlohmann/json.hpp>
 
@@ -40,8 +46,6 @@ namespace oracle_util {
 
 // ---------------------------------------------------------------------------
 // Internal: build a uniform evaluation grid.
-// 2-D order:           j (y) outer, i (x) inner      → grid[j*nx + i]
-// 3-D order: k (z) outer, j (y) middle, i (x) inner  → grid[(k*ny + j)*nx + i]
 // ---------------------------------------------------------------------------
 template <int dim>
 std::vector<dealii::Point<dim>>
@@ -51,16 +55,16 @@ make_grid_points(const std::vector<double>& bbox, int nx, int ny, int nz = 0) {
   if constexpr (dim == 2) {
     if (bbox.size() != 4)
       throw std::runtime_error("2-D grid writer expects bbox size 4");
-
     const double xmin = bbox[0], xmax = bbox[1];
     const double ymin = bbox[2], ymax = bbox[3];
-
     std::vector<dealii::Point<dim>> pts(static_cast<std::size_t>(nx) * ny);
     std::size_t idx = 0;
     for (int j = 0; j < ny; ++j) {
-      const double y = (ny > 1) ? ymin + j * (ymax - ymin) / (ny - 1) : 0.5 * (ymin + ymax);
+      const double y = (ny > 1) ? ymin + j * (ymax - ymin) / (ny - 1)
+                                : 0.5 * (ymin + ymax);
       for (int i = 0; i < nx; ++i) {
-        const double x = (nx > 1) ? xmin + i * (xmax - xmin) / (nx - 1) : 0.5 * (xmin + xmax);
+        const double x = (nx > 1) ? xmin + i * (xmax - xmin) / (nx - 1)
+                                  : 0.5 * (xmin + xmax);
         pts[idx++] = dealii::Point<dim>(x, y);
       }
     }
@@ -70,19 +74,20 @@ make_grid_points(const std::vector<double>& bbox, int nx, int ny, int nz = 0) {
       throw std::runtime_error("3-D grid writer expects bbox size 6");
     if (nz <= 0)
       throw std::runtime_error("3-D grid writer expects nz > 0");
-
     const double xmin = bbox[0], xmax = bbox[1];
     const double ymin = bbox[2], ymax = bbox[3];
     const double zmin = bbox[4], zmax = bbox[5];
-
     std::vector<dealii::Point<dim>> pts(static_cast<std::size_t>(nx) * ny * nz);
     std::size_t idx = 0;
     for (int k = 0; k < nz; ++k) {
-      const double z = (nz > 1) ? zmin + k * (zmax - zmin) / (nz - 1) : 0.5 * (zmin + zmax);
+      const double z = (nz > 1) ? zmin + k * (zmax - zmin) / (nz - 1)
+                                : 0.5 * (zmin + zmax);
       for (int j = 0; j < ny; ++j) {
-        const double y = (ny > 1) ? ymin + j * (ymax - ymin) / (ny - 1) : 0.5 * (ymin + ymax);
+        const double y = (ny > 1) ? ymin + j * (ymax - ymin) / (ny - 1)
+                                  : 0.5 * (ymin + ymax);
         for (int i = 0; i < nx; ++i) {
-          const double x = (nx > 1) ? xmin + i * (xmax - xmin) / (nx - 1) : 0.5 * (xmin + xmax);
+          const double x = (nx > 1) ? xmin + i * (xmax - xmin) / (nx - 1)
+                                    : 0.5 * (xmin + xmax);
           pts[idx++] = dealii::Point<dim>(x, y, z);
         }
       }
@@ -94,26 +99,24 @@ make_grid_points(const std::vector<double>& bbox, int nx, int ny, int nz = 0) {
 // ---------------------------------------------------------------------------
 // Write meta.json
 // ---------------------------------------------------------------------------
-inline void write_meta(const std::string&     outdir,
-                       int                    nx,
-                       int                    ny,
-                       int                    nz,
-                       std::size_t            num_dofs,
-                       double                 baseline_time,
-                       const std::string&     ksp_type = "",
-                       const std::string&     pc_type  = "",
-                       double                 rtol     = 0.0) {
+inline void write_meta(const std::string& outdir,
+                       int                nx,
+                       int                ny,
+                       int                nz,
+                       std::size_t        num_dofs,
+                       double             baseline_time,
+                       const std::string& ksp_type = "",
+                       const std::string& pc_type  = "",
+                       double             rtol      = 0.0) {
   nlohmann::json meta;
   meta["nx"]            = nx;
   meta["ny"]            = ny;
-  if (nz > 0)
-    meta["nz"]          = nz;
+  if (nz > 0) meta["nz"] = nz;
   meta["num_dofs"]      = num_dofs;
   meta["baseline_time"] = baseline_time;
   meta["ksp_type"]      = ksp_type;
   meta["pc_type"]       = pc_type;
   meta["rtol"]          = rtol;
-
   std::ofstream f(outdir + "/meta.json");
   if (!f.is_open())
     throw std::runtime_error("Cannot write meta.json to: " + outdir);
@@ -133,7 +136,92 @@ inline void write_binary(const std::string&         outdir,
 }
 
 // ---------------------------------------------------------------------------
-// Sample scalar FE solution and write output files
+// Internal: detect if the triangulation uses simplex cells (triangles/tets).
+// ---------------------------------------------------------------------------
+template <int dim>
+bool tria_is_simplex(const dealii::DoFHandler<dim>& dh) {
+  if (dh.get_triangulation().n_active_cells() == 0) return false;
+  return dh.get_triangulation().begin_active()->reference_cell().is_simplex();
+}
+
+// ---------------------------------------------------------------------------
+// eval_scalar_at_points
+//
+// Hypercube mesh: FEFieldFunction batch evaluation (fast, no exception for
+//   unit square/cube where all bbox points are inside the domain).
+// Simplex mesh  : VectorTools::point_value with MappingFE (correct simplex
+//   reference-to-physical mapping), per-point with try-catch so that bbox
+//   corners outside the complex domain are silently set to 0.
+// ---------------------------------------------------------------------------
+template <int dim>
+std::vector<double>
+eval_scalar_at_points(const dealii::DoFHandler<dim>&         dof_handler,
+                      const dealii::Vector<double>&           solution,
+                      const std::vector<dealii::Point<dim>>& pts) {
+  const std::size_t n_pts = pts.size();
+  std::vector<double> values(n_pts, 0.0);
+
+  if (!tria_is_simplex<dim>(dof_handler)) {
+    // ---- Hypercube path (original approach, unchanged) --------------------
+    dealii::Functions::FEFieldFunction<dim> field_func(dof_handler, solution);
+    field_func.value_list(pts, values);
+  } else {
+    // ---- Simplex path: per-point with correct mapping + exception guard ----
+    // MappingFE with P1 basis correctly handles the affine reference-to-
+    // physical mapping for straight-sided triangles loaded from Gmsh.
+    dealii::MappingFE<dim> mapping(dealii::FE_SimplexP<dim>(1));
+    for (std::size_t i = 0; i < n_pts; ++i) {
+      try {
+        values[i] = dealii::VectorTools::point_value(
+            mapping, dof_handler, solution, pts[i]);
+      } catch (...) {
+        values[i] = 0.0;  // point is outside the complex domain → 0
+      }
+    }
+  }
+
+  return values;
+}
+
+// ---------------------------------------------------------------------------
+// eval_vector_at_points
+//
+// Same dual strategy for vector-valued FE solutions (Stokes, linear elast.).
+// Returns a flat array of Vector<double> of length n_pts; each has n_comps
+// entries.  Points outside the domain → zero vector.
+// ---------------------------------------------------------------------------
+template <int dim>
+std::vector<dealii::Vector<double>>
+eval_vector_at_points(const dealii::DoFHandler<dim>&         dof_handler,
+                      const dealii::Vector<double>&           solution,
+                      const std::vector<dealii::Point<dim>>& pts) {
+  const std::size_t  n_pts   = pts.size();
+  const unsigned int n_comps = dof_handler.get_fe().n_components();
+  std::vector<dealii::Vector<double>> values(
+      n_pts, dealii::Vector<double>(n_comps));
+
+  if (!tria_is_simplex<dim>(dof_handler)) {
+    // ---- Hypercube path ---------------------------------------------------
+    dealii::Functions::FEFieldFunction<dim> field_func(dof_handler, solution);
+    field_func.vector_value_list(pts, values);
+  } else {
+    // ---- Simplex path -----------------------------------------------------
+    dealii::MappingFE<dim> mapping(dealii::FE_SimplexP<dim>(1));
+    for (std::size_t i = 0; i < n_pts; ++i) {
+      try {
+        dealii::VectorTools::point_value(
+            mapping, dof_handler, solution, pts[i], values[i]);
+      } catch (...) {
+        values[i] = 0.0;
+      }
+    }
+  }
+
+  return values;
+}
+
+// ---------------------------------------------------------------------------
+// write_scalar_grid  (with nz for 3-D)
 // ---------------------------------------------------------------------------
 template <int dim = 2>
 void write_scalar_grid(const dealii::DoFHandler<dim>&  dof_handler,
@@ -147,20 +235,14 @@ void write_scalar_grid(const dealii::DoFHandler<dim>&  dof_handler,
                        const std::string&              ksp_type = "",
                        const std::string&              pc_type  = "",
                        double                          rtol     = 0.0) {
-  auto pts = make_grid_points<dim>(bbox, nx, ny, nz);
-  const std::size_t n_pts = pts.size();
-
-  // FEFieldFunction wraps solution for arbitrary-point evaluation
-  dealii::Functions::FEFieldFunction<dim> field_func(dof_handler, solution);
-
-  std::vector<double> values(n_pts);
-  field_func.value_list(pts, values);
-
+  auto pts    = make_grid_points<dim>(bbox, nx, ny, nz);
+  auto values = eval_scalar_at_points<dim>(dof_handler, solution, pts);
   write_binary(outdir, values);
   write_meta(outdir, nx, ny, dim == 3 ? nz : 0, dof_handler.n_dofs(),
              baseline_time, ksp_type, pc_type, rtol);
 }
 
+// 2-D convenience overload (no nz)
 template <int dim = 2>
 void write_scalar_grid(const dealii::DoFHandler<dim>&  dof_handler,
                        const dealii::Vector<double>&   solution,
@@ -172,13 +254,12 @@ void write_scalar_grid(const dealii::DoFHandler<dim>&  dof_handler,
                        const std::string&              ksp_type = "",
                        const std::string&              pc_type  = "",
                        double                          rtol     = 0.0) {
-  write_scalar_grid<dim>(
-      dof_handler, solution, bbox, nx, ny, 0, outdir, baseline_time, ksp_type, pc_type, rtol);
+  write_scalar_grid<dim>(dof_handler, solution, bbox, nx, ny, 0,
+                         outdir, baseline_time, ksp_type, pc_type, rtol);
 }
 
 // ---------------------------------------------------------------------------
-// Sample vector FE solution: write |u| (magnitude)
-// Used by Stokes and Navier-Stokes (velocity component 0..1)
+// write_vector_magnitude_grid  (Stokes / Navier-Stokes / linear_elasticity)
 // ---------------------------------------------------------------------------
 template <int dim = 2>
 void write_vector_magnitude_grid(const dealii::DoFHandler<dim>&  dof_handler,
@@ -192,24 +273,15 @@ void write_vector_magnitude_grid(const dealii::DoFHandler<dim>&  dof_handler,
                                  const std::string&              ksp_type = "",
                                  const std::string&              pc_type  = "",
                                  double                          rtol     = 0.0) {
-  auto pts = make_grid_points<dim>(bbox, nx, ny, nz);
+  auto pts      = make_grid_points<dim>(bbox, nx, ny, nz);
+  auto vec_vals = eval_vector_at_points<dim>(dof_handler, solution, pts);
+
   const std::size_t n_pts = pts.size();
-
-  dealii::Functions::FEFieldFunction<dim> field_func(dof_handler, solution);
-
-  // FEFieldFunction::vector_value_list requires vectors sized to the full number
-  // of FE components (e.g. 3 for NS/Stokes: ux, uy, p).  Using dim=2 instead
-  // causes out-of-bounds writes in Release mode (assertions disabled), silently
-  // corrupting the output and producing NaN magnitudes.
-  const unsigned int n_comps = dof_handler.get_fe().n_components();
-  std::vector<dealii::Vector<double>> vec_values(n_pts, dealii::Vector<double>(n_comps));
-  field_func.vector_value_list(pts, vec_values);
-
-  std::vector<double> magnitudes(n_pts);
+  std::vector<double> magnitudes(n_pts, 0.0);
   for (std::size_t k = 0; k < n_pts; ++k) {
     double mag2 = 0.0;
-    for (int d = 0; d < dim; ++d)   // only the first dim components are velocity
-      mag2 += vec_values[k][d] * vec_values[k][d];
+    for (int d = 0; d < dim; ++d)
+      mag2 += vec_vals[k][d] * vec_vals[k][d];
     magnitudes[k] = std::sqrt(mag2);
   }
 
@@ -218,6 +290,7 @@ void write_vector_magnitude_grid(const dealii::DoFHandler<dim>&  dof_handler,
              baseline_time, ksp_type, pc_type, rtol);
 }
 
+// 2-D convenience overload
 template <int dim = 2>
 void write_vector_magnitude_grid(const dealii::DoFHandler<dim>&  dof_handler,
                                  const dealii::Vector<double>&   solution,
@@ -229,8 +302,8 @@ void write_vector_magnitude_grid(const dealii::DoFHandler<dim>&  dof_handler,
                                  const std::string&              ksp_type = "",
                                  const std::string&              pc_type  = "",
                                  double                          rtol     = 0.0) {
-  write_vector_magnitude_grid<dim>(
-      dof_handler, solution, bbox, nx, ny, 0, outdir, baseline_time, ksp_type, pc_type, rtol);
+  write_vector_magnitude_grid<dim>(dof_handler, solution, bbox, nx, ny, 0,
+                                   outdir, baseline_time, ksp_type, pc_type, rtol);
 }
 
 }  // namespace oracle_util

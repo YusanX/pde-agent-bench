@@ -20,6 +20,7 @@ from .common import (
     sample_scalar_on_grid,
     _scalar_solver_params,
     _eval_exact_sym_on_grid,
+    _apply_domain_mask,
 )
 
 
@@ -128,7 +129,10 @@ class FiredrakeHeatSolver:
 
         baseline_error = 0.0
         if u_exact_sym is not None:
-            u_exact_grid = _eval_exact_sym_on_grid(u_sym, coords, grid_cfg, t=t_cur, t_sym=st)
+            u_exact_grid = _apply_domain_mask(
+                u_grid,
+                _eval_exact_sym_on_grid(u_sym, coords, grid_cfg, t=t_cur, t_sym=st),
+            )
             baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
             u_grid = u_exact_grid
         else:

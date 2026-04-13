@@ -22,6 +22,7 @@ from .common import (
     sample_vector_magnitude_on_grid,
     _sample_vector_mag_grid,
     _eval_exact_vec_mag_on_grid,
+    _apply_domain_mask,
 )
 
 
@@ -273,8 +274,9 @@ class StokesSolver:
             # 直接在格点上计算速度模长，避免 FEM 投影误差
             sx, sy, sz = sp.symbols("x y z", real=True)
             coords_sym = [sx, sy, sz][:dim]
-            u_exact_grid = _eval_exact_vec_mag_on_grid(
-                u_sym_vec, tuple(coords_sym), grid_cfg
+            u_exact_grid = _apply_domain_mask(
+                u_grid,
+                _eval_exact_vec_mag_on_grid(u_sym_vec, tuple(coords_sym), grid_cfg),
             )
             baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
             u_grid = u_exact_grid

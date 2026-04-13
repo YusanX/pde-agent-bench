@@ -466,33 +466,51 @@ def _is_3d_grid(bbox: List[float], nz: Optional[int] = None) -> bool:
 
 
 def _at_scalar_safe(u_h: Function, coords: np.ndarray) -> np.ndarray:
-    """Evaluate a scalar Function at coords, returning 0.0 for out-of-domain points.
+    """Evaluate a scalar Function at coords, returning NaN for out-of-domain points.
 
     Uses ``dont_raise=True`` so Firedrake returns None instead of raising
     PointNotInDomainError for points outside non-convex / irregular meshes
     (e.g. l_shape, annulus, dumbbell …).
 
-    Out-of-domain points are filled with 0.0, matching the DOLFINx oracle
-    convention (nan_to_num(nan=0.0) after MPI reduction).
+    Out-of-domain points are NaN so that error computation ignores them via
+    the NaN-safe ``compute_rel_L2_grid``.
     """
     raw = u_h.at(coords, dont_raise=True)
     return np.array(
-        [float(v) if v is not None else 0.0 for v in raw],
+        [float(v) if v is not None else np.nan for v in raw],
         dtype=float,
     )
 
 
 def _at_vector_mag_safe(u_h: Function, coords: np.ndarray) -> np.ndarray:
-    """Evaluate ||u|| at coords, returning 0.0 for out-of-domain points."""
+    """Evaluate ||u|| at coords, returning NaN for out-of-domain points."""
     raw = u_h.at(coords, dont_raise=True)
     result = np.empty(len(raw), dtype=float)
     for i, v in enumerate(raw):
         if v is None:
-            result[i] = 0.0
+            result[i] = np.nan
         else:
             arr = np.asarray(v, dtype=float)
             result[i] = float(np.linalg.norm(arr)) if arr.ndim > 0 else float(abs(arr))
     return result
+
+
+def _apply_domain_mask(
+    u_fem_grid: Optional[np.ndarray],
+    u_exact_grid: np.ndarray,
+) -> np.ndarray:
+    """将 FEM 采样的域内掩码应用到精确解网格。
+
+    域外点在 FEM 采样结果中为 NaN（``_at_scalar_safe`` / ``_at_vector_mag_safe``
+    的返回值）。将相同位置在精确解中也设为 NaN，使误差计算只覆盖域内点。
+
+    对简单（矩形）域无域外点时为空操作，不影响现有结果。
+    """
+    if u_fem_grid is None or not np.any(np.isnan(u_fem_grid)):
+        return u_exact_grid
+    masked = u_exact_grid.copy()
+    masked[np.isnan(u_fem_grid)] = np.nan
+    return masked
 
 
 def sample_scalar_on_grid(

@@ -21,6 +21,7 @@ from .common import (
     create_mesh, create_mixed_space,
     parse_expression, parse_vector_expression,
     sample_vector_magnitude_on_grid,
+    _apply_domain_mask,
 )
 from .stokes import (
     _build_velocity_bcs,
@@ -262,6 +263,7 @@ class FiredrakeNavierStokesOracle:
                 _, _, u_exact_grid = sample_vector_magnitude_on_grid(
                     u_exact_fn, grid_cfg["bbox"], nx_g, ny_g
                 )
+            u_exact_grid = _apply_domain_mask(u_grid, u_exact_grid)
             baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
             u_grid = u_exact_grid
         else:

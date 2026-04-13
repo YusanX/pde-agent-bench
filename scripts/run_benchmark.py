@@ -164,14 +164,17 @@ def run_oracle(
         )
         
         # 构建缓存数据
+        # 参考解中 NaN 表示域外点，JSON 不支持 NaN，用 None（即 JSON null）替代
+        ref_arr = result.reference
+        ref_list = [None if np.isnan(v) else float(v) for v in ref_arr.flatten().tolist()]
         cached = {
             'error': result.baseline_error,
             'time': result.baseline_time,
             'case_id': case_id,
             'num_dofs': result.num_dofs,
             'solver_info': result.solver_info,
-            # 存储参考解（用于误差计算）
-            'reference': result.reference.tolist(),
+            'reference': ref_list,
+            'reference_shape': list(ref_arr.shape),
         }
         
         # 保存缓存
@@ -265,7 +268,7 @@ def execute_solver(
 
 def compute_error(agent_output: Path, oracle_info: Dict) -> float:
     """
-    计算相对L2误差
+    计算相对L2误差（NaN-safe：域外点以 NaN 标记，双侧均忽略）
     
     Args:
         agent_output: Agent 输出目录（包含 solution.npz）
@@ -279,12 +282,21 @@ def compute_error(agent_output: Path, oracle_info: Dict) -> float:
         agent_sol = np.load(agent_output / "solution.npz")
         u_agent = agent_sol['u']
         
-        # 从 oracle_info 获取参考解
+        # 从 oracle_info 获取参考解，还原 None → NaN（域外掩码）
         if oracle_info.get('reference') is None:
             print(f"   ⚠️  No reference solution in oracle cache")
             return float('nan')
         
-        u_ref = np.array(oracle_info['reference'])
+        ref_flat = oracle_info['reference']
+        u_ref = np.array([np.nan if v is None else float(v) for v in ref_flat], dtype=float)
+        
+        # 还原形状
+        ref_shape = oracle_info.get('reference_shape')
+        if ref_shape:
+            u_ref = u_ref.reshape(ref_shape)
+        else:
+            # 兼容旧缓存（无 reference_shape 字段，无 NaN）
+            u_ref = u_ref.reshape(u_agent.shape) if u_ref.size == u_agent.size else u_ref
         
         # 处理形状不匹配
         if u_agent.shape != u_ref.shape:
@@ -292,16 +304,20 @@ def compute_error(agent_output: Path, oracle_info: Dict) -> float:
             factors = np.array(u_ref.shape) / np.array(u_agent.shape)
             u_agent = zoom(u_agent, factors, order=1)
         
-        # 计算相对L2误差
-        diff = u_agent - u_ref
-        ref_norm = np.sqrt(np.sum(u_ref**2))
+        # NaN-safe 相对 L2 误差：跳过域外点（u_ref 为 NaN）及 agent 输出中的 NaN
+        mask = ~(np.isnan(u_agent) | np.isnan(u_ref))
+        diff = (u_agent - u_ref)[mask]
+        ref_vals = u_ref[mask]
         
+        if diff.size == 0:
+            print(f"   ⚠️  No valid inside-domain points for error computation")
+            return float('nan')
+        
+        ref_norm = np.sqrt(float(np.sum(ref_vals ** 2)))
         if ref_norm < 1e-15:
-            return np.sqrt(np.sum(diff**2))
+            return float(np.sqrt(float(np.sum(diff ** 2))))
         
-        rel_L2 = np.sqrt(np.sum(diff**2)) / ref_norm
-        
-        return float(rel_L2)
+        return float(np.sqrt(float(np.sum(diff ** 2))) / ref_norm)
         
     except Exception as e:
         print(f"   ⚠️  Error computation failed: {e}")
@@ -581,14 +597,19 @@ def _make_error_result(case_id: str, status: str, error_msg: str, stderr: str = 
 
 
 def _write_oracle_reference(case: Dict, oracle_info: Dict, oracle_output: Path):
-    """保存oracle参考解到oracle_output"""
+    """保存oracle参考解到oracle_output（NaN-safe：None → NaN）"""
     if oracle_info.get('reference') is None:
         return
     try:
         grid_cfg = case['oracle_config']['output']['grid']
         x = np.linspace(grid_cfg['bbox'][0], grid_cfg['bbox'][1], grid_cfg['nx'])
         y = np.linspace(grid_cfg['bbox'][2], grid_cfg['bbox'][3], grid_cfg['ny'])
-        u_star = np.array(oracle_info['reference'])
+        # 还原 None → NaN（域外掩码）
+        ref_flat = oracle_info['reference']
+        u_star = np.array([np.nan if v is None else float(v) for v in ref_flat], dtype=float)
+        ref_shape = oracle_info.get('reference_shape')
+        if ref_shape:
+            u_star = u_star.reshape(ref_shape)
         np.savez(oracle_output / "reference.npz", x=x, y=y, u_star=u_star)
     except Exception as e:
         print(f"   ⚠️  Failed to write oracle reference: {e}")

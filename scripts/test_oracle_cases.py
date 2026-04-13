@@ -119,14 +119,16 @@ def test_oracle_case(
             result['error'] = "Reference solution is empty"
             return result
         
-        # 检查是否有 NaN 或 Inf
+        # 检查是否有 Inf（NaN 是合法的域外掩码，不视为错误）
         import numpy as np
-        if np.any(np.isnan(oracle_result.reference)):
-            result['error'] = "Reference contains NaN"
-            return result
-        
         if np.any(np.isinf(oracle_result.reference)):
             result['error'] = "Reference contains Inf"
+            return result
+        
+        # 确保域内至少有有效点
+        inside_count = int(np.sum(~np.isnan(oracle_result.reference)))
+        if inside_count == 0:
+            result['error'] = "Reference contains only NaN (no inside-domain points)"
             return result
         
         # 成功

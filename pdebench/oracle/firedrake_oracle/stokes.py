@@ -20,6 +20,7 @@ from .common import (
     parse_expression, parse_vector_expression,
     sample_vector_magnitude_on_grid,
     _eval_exact_vec_mag_on_grid,
+    _apply_domain_mask,
 )
 
 
@@ -295,7 +296,7 @@ class FiredrakeStokesOracle:
 
         baseline_error = 0.0
         if u_exact_fn is not None:
-            u_exact_grid = _eval_exact_vec_mag_on_grid(u_sym_vec, tuple(coords), grid_cfg)
+            u_exact_grid = _apply_domain_mask(u_grid, _eval_exact_vec_mag_on_grid(u_sym_vec, tuple(coords), grid_cfg))
             baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
             u_grid = u_exact_grid
         else:
