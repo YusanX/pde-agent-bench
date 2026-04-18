@@ -153,27 +153,56 @@ def execute_agent_script(
     t_end = time.time()
     wall_time = t_end - t_start
     
-    # Check if execution was successful
-    success = (exit_code == 0) and not timeout_occurred
-    
     # Locate output files
     solution_file = outdir / 'solution.npz'
     meta_file = outdir / 'meta.json'
-    
-    if success:
-        # Verify required output files exist
-        if not solution_file.exists():
-            success = False
-            error_message = "Required output file 'solution.npz' not found"
-        elif not meta_file.exists():
-            success = False
-            error_message = "Required output file 'meta.json' not found"
-        else:
-            error_message = None
-    else:
+
+    if timeout_occurred:
+        success = False
         error_message = stderr if stderr else "Unknown execution failure"
         solution_file = None
         meta_file = None
+    elif exit_code == 0:
+        # 正常退出：验证输出文件
+        if not solution_file.exists():
+            success = False
+            error_message = "Required output file 'solution.npz' not found"
+            solution_file = None
+            meta_file = None
+        elif not meta_file.exists():
+            success = False
+            error_message = "Required output file 'meta.json' not found"
+            solution_file = None
+            meta_file = None
+        else:
+            success = True
+            error_message = None
+    else:
+        # exit code 非零：可能是进程退出阶段（非计算阶段）崩溃（如 MUMPS+OpenBLAS
+        # 堆内存损坏），此时 solve() 已正常完成并写出文件。
+        # 以输出文件是否完整可读作为真正的成功判断依据。
+        if solution_file.exists() and meta_file.exists():
+            try:
+                import numpy as np
+                import json as _json
+                np.load(solution_file)
+                with open(meta_file) as _f:
+                    _json.load(_f)
+                success = True
+                error_message = None
+            except Exception as _e:
+                success = False
+                error_message = (
+                    f"Output files exist but are invalid ({_e}). "
+                    f"stderr: {stderr[:500] if stderr else ''}"
+                )
+                solution_file = None
+                meta_file = None
+        else:
+            success = False
+            error_message = stderr if stderr else "Unknown execution failure"
+            solution_file = None
+            meta_file = None
     
     return ExecutionResult(
         success=success,
@@ -190,6 +219,35 @@ def execute_agent_script(
     )
 
 
+def _build_agent_case_spec(case: Dict[str, Any]) -> Dict[str, Any]:
+    """构造传给 agent solve() 的精简 spec，屏蔽 oracle 内部参数。
+
+    只暴露 agent 需要的信息：
+      - pde       方程参数（类型、系数、源项、制造解等）
+      - domain    几何域描述（供 agent 建网格）
+      - bc        边界条件
+      - output    输出网格规格（bbox / nx / ny）
+      - agent_knobs  允许 agent 自主调节的参数列表
+      - id / pde_classification  元信息
+
+    不暴露：
+      - oracle_config.mesh        oracle 用的网格精度
+      - oracle_config.fem         oracle 用的有限元阶次
+      - oracle_config.oracle_solver  oracle 求解器参数
+    """
+    oc = case.get("oracle_config", {})
+    return {
+        "id":                 case.get("id", ""),
+        "pde_classification": case.get("pde_classification", {}),
+        "pde":                oc.get("pde", {}),
+        "domain":             oc.get("domain", {"type": "unit_square"}),
+        "bc":                 oc.get("bc", {}),
+        "output":             oc.get("output", {}),
+        "agent_knobs":        case.get("agent_knobs", []),
+        "evaluation_config":  case.get("evaluation_config", {}),
+    }
+
+
 def execute_agent_function(
     script_path: Path,
     outdir: Path,
@@ -202,8 +260,10 @@ def execute_agent_function(
     Execute agent script by calling solve(case_spec) and let evaluator write outputs.
     """
     outdir.mkdir(parents=True, exist_ok=True)
+    # 传给 agent 的是精简视图，不含 oracle 内部参数（mesh/fem/oracle_solver）
+    agent_case = _build_agent_case_spec(case_spec)
     case_file = outdir / "case_spec.json"
-    case_file.write_text(json.dumps(case_spec))
+    case_file.write_text(json.dumps(agent_case))
     runner_path = outdir / "_runner.py"
 
     runner_code = f"""import argparse
@@ -261,62 +321,72 @@ def main():
 
     u_grid = np.array(u_grid, dtype=float)
 
-    grid = case_spec["oracle_config"]["output"]["grid"]
+    # case_spec 是 agent 视图，output 直接在顶层
+    grid = case_spec["output"]["grid"]
     nx, ny = grid["nx"], grid["ny"]
+    bbox = grid["bbox"]
+
     if u_grid.ndim == 1:
-        # Try to infer a square-ish shape first, then fallback to direct reshape
-        side = int(round(u_grid.size ** 0.5))
-        if side * side == u_grid.size:
-            u_grid = u_grid.reshape((side, side))
+        # 1-D 时尝试按 (ny, nx) reshape
+        if u_grid.size == ny * nx:
+            u_grid = u_grid.reshape((ny, nx))
         else:
-            raise ValueError(f"Cannot reshape 1-D array of size {{u_grid.size}} into a 2-D grid")
+            side = int(round(u_grid.size ** 0.5))
+            if side * side == u_grid.size:
+                u_grid = u_grid.reshape((side, side))
+            else:
+                raise ValueError(f"Cannot reshape 1-D array of size {{u_grid.size}} into a 2-D grid")
     if u_grid.ndim != 2:
         raise ValueError(f"u_grid must be 2-D, got shape {{u_grid.shape}}")
 
-    # Resample to oracle reference grid if agent used a different resolution.
-    # This allows agents to freely choose their output grid size.
-    if u_grid.shape != (nx, ny):
+    # 约定：u_grid 形状为 (ny, nx)，即 u_grid[row_y, col_x]
+    # 若 agent 返回的尺寸与 oracle 不同，则重采样到 (ny, nx)
+    # NaN（域外点）用 fill_value=np.nan 保留，不向内部晕染
+    if u_grid.shape != (ny, nx):
         from scipy.interpolate import RegularGridInterpolator
-        agent_nx, agent_ny = u_grid.shape
-        agent_x = np.linspace(grid["bbox"][0], grid["bbox"][1], agent_nx)
-        agent_y = np.linspace(grid["bbox"][2], grid["bbox"][3], agent_ny)
+        agent_ny, agent_nx = u_grid.shape          # 行=y，列=x
+        agent_y = np.linspace(bbox[2], bbox[3], agent_ny)
+        agent_x = np.linspace(bbox[0], bbox[1], agent_nx)
         interp = RegularGridInterpolator(
-            (agent_x, agent_y), u_grid, method="linear", bounds_error=False, fill_value=None
+            (agent_y, agent_x), u_grid,
+            method="linear", bounds_error=False, fill_value=np.nan,
         )
-        ref_x = np.linspace(grid["bbox"][0], grid["bbox"][1], nx)
-        ref_y = np.linspace(grid["bbox"][2], grid["bbox"][3], ny)
-        XX, YY = np.meshgrid(ref_x, ref_y, indexing="ij")
-        u_grid = interp(np.stack([XX.ravel(), YY.ravel()], axis=-1)).reshape(nx, ny)
+        ref_y = np.linspace(bbox[2], bbox[3], ny)
+        ref_x = np.linspace(bbox[0], bbox[1], nx)
+        YY, XX = np.meshgrid(ref_y, ref_x, indexing="ij")  # shape (ny, nx)
+        u_grid = interp(np.stack([YY.ravel(), XX.ravel()], axis=-1)).reshape(ny, nx)
 
-    x = np.linspace(grid["bbox"][0], grid["bbox"][1], nx)
-    y = np.linspace(grid["bbox"][2], grid["bbox"][3], ny)
+    x = np.linspace(bbox[0], bbox[1], nx)
+    y = np.linspace(bbox[2], bbox[3], ny)
     np.savez(f"{{args.outdir}}/solution.npz", x=x, y=y, u=u_grid)
-    
+
     # Save u.npy for specialized metrics (e.g., front propagation speed)
     np.save(f"{{args.outdir}}/u.npy", u_grid)
-    
+
     # Save u_initial.npy if provided (for time-dependent problems)
     u_initial = result.get("u_initial")
     if u_initial is not None:
         u_initial = np.array(u_initial, dtype=float)
         if u_initial.ndim == 1:
-            side = int(round(u_initial.size ** 0.5))
-            if side * side == u_initial.size:
-                u_initial = u_initial.reshape((side, side))
-        if u_initial.ndim == 2 and u_initial.shape != (nx, ny):
+            if u_initial.size == ny * nx:
+                u_initial = u_initial.reshape((ny, nx))
+            else:
+                side = int(round(u_initial.size ** 0.5))
+                if side * side == u_initial.size:
+                    u_initial = u_initial.reshape((side, side))
+        if u_initial.ndim == 2 and u_initial.shape != (ny, nx):
             from scipy.interpolate import RegularGridInterpolator
-            init_nx, init_ny = u_initial.shape
-            init_x = np.linspace(grid["bbox"][0], grid["bbox"][1], init_nx)
-            init_y = np.linspace(grid["bbox"][2], grid["bbox"][3], init_ny)
+            init_ny, init_nx = u_initial.shape
+            init_y = np.linspace(bbox[2], bbox[3], init_ny)
+            init_x = np.linspace(bbox[0], bbox[1], init_nx)
             interp_init = RegularGridInterpolator(
-                (init_x, init_y), u_initial, method="linear", bounds_error=False, fill_value=None
+                (init_y, init_x), u_initial,
+                method="linear", bounds_error=False, fill_value=np.nan,
             )
-            XX, YY = np.meshgrid(
-                np.linspace(grid["bbox"][0], grid["bbox"][1], nx),
-                np.linspace(grid["bbox"][2], grid["bbox"][3], ny),
-                indexing="ij"
-            )
-            u_initial = interp_init(np.stack([XX.ravel(), YY.ravel()], axis=-1)).reshape(nx, ny)
+            ref_y = np.linspace(bbox[2], bbox[3], ny)
+            ref_x = np.linspace(bbox[0], bbox[1], nx)
+            YY, XX = np.meshgrid(ref_y, ref_x, indexing="ij")
+            u_initial = interp_init(np.stack([YY.ravel(), XX.ravel()], axis=-1)).reshape(ny, nx)
         np.save(f"{{args.outdir}}/u_initial.npy", u_initial)
 
     meta = {{
@@ -388,24 +458,57 @@ if __name__ == "__main__":
 
     t_end = time.time()
     wall_time = t_end - t_start
-    success = (exit_code == 0) and not timeout_occurred
 
     solution_file = outdir / "solution.npz"
     meta_file = outdir / "meta.json"
 
-    if success:
-        if not solution_file.exists():
-            success = False
-            error_message = "Required output file 'solution.npz' not found"
-        elif not meta_file.exists():
-            success = False
-            error_message = "Required output file 'meta.json' not found"
-        else:
-            error_message = None
-    else:
+    if timeout_occurred:
+        success = False
         error_message = stderr if stderr else "Unknown execution failure"
         solution_file = None
         meta_file = None
+    elif exit_code == 0:
+        # 正常退出：验证输出文件
+        if not solution_file.exists():
+            success = False
+            error_message = "Required output file 'solution.npz' not found"
+            solution_file = None
+            meta_file = None
+        elif not meta_file.exists():
+            success = False
+            error_message = "Required output file 'meta.json' not found"
+            solution_file = None
+            meta_file = None
+        else:
+            success = True
+            error_message = None
+    else:
+        # exit code 非零：可能是进程退出阶段（非计算阶段）崩溃（如 MUMPS+OpenBLAS
+        # 堆内存损坏），此时 solve() 已正常完成并写出文件。
+        # 以输出文件是否完整可读作为真正的成功判断依据。
+        if solution_file.exists() and meta_file.exists():
+            try:
+                import numpy as np
+                import json as _json
+                np.load(solution_file)
+                with open(meta_file) as _f:
+                    _json.load(_f)
+                # 文件完整可读，视为成功；保留 stderr 供诊断
+                success = True
+                error_message = None
+            except Exception as _e:
+                success = False
+                error_message = (
+                    f"Output files exist but are invalid ({_e}). "
+                    f"stderr: {stderr[:500] if stderr else ''}"
+                )
+                solution_file = None
+                meta_file = None
+        else:
+            success = False
+            error_message = stderr if stderr else "Unknown execution failure"
+            solution_file = None
+            meta_file = None
 
     return ExecutionResult(
         success=success,

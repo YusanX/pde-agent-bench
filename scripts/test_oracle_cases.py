@@ -53,8 +53,12 @@ def load_all_cases(
     data_file: Path,
     equation_types: List[str] | None = None,
     case_ids: List[str] | None = None,
+    solver_library: str | None = None,
 ) -> List[Dict[str, Any]]:
-    """加载所有 cases，可按方程类型或 case ID 过滤"""
+    """加载所有 cases，可按方程类型、case ID 或后端过滤。
+
+    若 case 含 supported_libraries 字段，则自动跳过当前 solver_library 不支持的 case。
+    """
     cases = []
     eq_types = [t.lower() for t in equation_types] if equation_types else None
     id_set = set(case_ids) if case_ids else None
@@ -67,6 +71,10 @@ def load_all_cases(
                 if eq_types is not None:
                     pde_type = case.get('oracle_config', {}).get('pde', {}).get('type', '').lower()
                     if pde_type not in eq_types:
+                        continue
+                if solver_library is not None:
+                    supported = case.get('supported_libraries')
+                    if supported is not None and solver_library not in supported:
                         continue
                 cases.append(case)
     return cases
@@ -207,7 +215,7 @@ def main():
     data_file = (
         Path(args.data_file)
         if args.data_file
-        else Path(__file__).parent.parent / 'data' / 'benchmark_v2.jsonl'
+        else Path(__file__).parent.parent / 'data' / 'benchmark_merged.jsonl'
     )
 
     if not data_file.exists():
@@ -219,7 +227,9 @@ def main():
         data_file,
         equation_types=args.equation_types,
         case_ids=args.case_ids,
+        solver_library=solver_library,
     )
+    print(f"🔧 Filtered by library: {solver_library}")
     if args.equation_types:
         print(f"🎯 Filtered equation types: {', '.join(args.equation_types)}")
     if args.case_ids:

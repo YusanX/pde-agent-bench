@@ -34,6 +34,23 @@ _PREBUILT_ENV = os.environ.get("DEALII_ORACLE_PREBUILT_DIR", "")
 _BUILD_DIR    = Path(_PREBUILT_ENV) if _PREBUILT_ENV else _ORACLE_DIR / "build"
 
 
+def _apply_domain_mask(
+    u_fem_grid: Optional[np.ndarray],
+    u_exact_grid: np.ndarray,
+) -> np.ndarray:
+    """将 FEM 采样的域内掩码应用到精确解网格。
+
+    C++ eval_scalar_at_points / eval_vector_at_points 修复后，复杂域的域外点
+    在 FEM 采样结果（grid）中为 NaN。将相同位置在精确解中也设为 NaN，使
+    误差计算只覆盖域内点。对简单（矩形/立方体）域无域外 NaN 时为空操作。
+    """
+    if u_fem_grid is None or not np.any(np.isnan(u_fem_grid)):
+        return u_exact_grid
+    masked = u_exact_grid.copy()
+    masked[np.isnan(u_fem_grid)] = np.nan
+    return masked
+
+
 def _sample_exact_scalar_grid(
     expr_str: str,
     grid_cfg: Dict[str, Any],
@@ -532,36 +549,42 @@ class DealIIOracleSolver:
         if pde_type == "poisson":
             ref_grid, ref_info = _poisson_reference_grid(self, case_spec)
             if ref_grid is not None:
+                ref_grid = _apply_domain_mask(grid, ref_grid)
                 baseline_error = compute_rel_L2_grid(grid, ref_grid)
                 reference = ref_grid
                 solver_info.update(ref_info)
         elif pde_type == "heat":
             ref_grid, ref_info = _heat_reference_grid(self, case_spec)
             if ref_grid is not None:
+                ref_grid = _apply_domain_mask(grid, ref_grid)
                 baseline_error = compute_rel_L2_grid(grid, ref_grid)
                 reference = ref_grid
                 solver_info.update(ref_info)
         elif pde_type == "helmholtz":
             ref_grid, ref_info = _helmholtz_reference_grid(self, case_spec)
             if ref_grid is not None:
+                ref_grid = _apply_domain_mask(grid, ref_grid)
                 baseline_error = compute_rel_L2_grid(grid, ref_grid)
                 reference = ref_grid
                 solver_info.update(ref_info)
         elif pde_type == "biharmonic":
             ref_grid, ref_info = _biharmonic_reference_grid(self, case_spec)
             if ref_grid is not None:
+                ref_grid = _apply_domain_mask(grid, ref_grid)
                 baseline_error = compute_rel_L2_grid(grid, ref_grid)
                 reference = ref_grid
                 solver_info.update(ref_info)
         elif pde_type in ("convection_diffusion", "reaction_diffusion"):
             ref_grid, ref_info = _scalar_pde_reference_grid(self, case_spec, pde_type)
             if ref_grid is not None:
+                ref_grid = _apply_domain_mask(grid, ref_grid)
                 baseline_error = compute_rel_L2_grid(grid, ref_grid)
                 reference = ref_grid
                 solver_info.update(ref_info)
         elif pde_type in ("stokes", "navier_stokes", "linear_elasticity"):
             ref_grid, ref_info = _vector_magnitude_pde_reference_grid(self, case_spec, pde_type)
             if ref_grid is not None:
+                ref_grid = _apply_domain_mask(grid, ref_grid)
                 baseline_error = compute_rel_L2_grid(grid, ref_grid)
                 reference = ref_grid
                 solver_info.update(ref_info)

@@ -7,13 +7,16 @@
  *
  * Scheme: backward Euler (implicit)  →  (M + dt·K) uⁿ⁺¹ = M·uⁿ + dt·fⁿ⁺¹
  *
- * Supports both 2-D and 3-D unit domains.
+ * Supports both unit-square/cube domains (FE_Q, structured quad mesh) and
+ * complex 2-D geometries loaded from a Gmsh .msh file (FE_SimplexP, triangular
+ * mesh).  The mesh type is detected at run-time via mesh_factory.h.
  */
 
 #include <cmath>
 #include <filesystem>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <string>
 
 #include <deal.II/base/function_parser.h>
@@ -22,8 +25,10 @@
 #include <deal.II/dofs/dof_handler.h>
 #include <deal.II/dofs/dof_tools.h>
 #include <deal.II/fe/fe_q.h>
+#include <deal.II/fe/fe_simplex_p.h>
 #include <deal.II/fe/fe_values.h>
 #include <deal.II/grid/grid_generator.h>
+#include <deal.II/grid/grid_in.h>
 #include <deal.II/grid/tria.h>
 #include <deal.II/lac/affine_constraints.h>
 #include <deal.II/lac/dynamic_sparsity_pattern.h>
@@ -38,6 +43,7 @@
 
 #include "case_spec_reader.h"
 #include "grid_writer.h"
+#include "mesh_factory.h"
 
 using namespace dealii;
 
@@ -61,7 +67,7 @@ template <int dim>
 class HeatOracle {
  public:
   explicit HeatOracle(const CaseSpec& s)
-      : spec_(s), fe_(s.fem.degree), dh_(tria_) {}
+      : spec_(s), dh_(tria_) {}
 
   void run(const std::string& outdir) {
     std::filesystem::create_directories(outdir);
@@ -83,25 +89,28 @@ class HeatOracle {
   }
 
  private:
-  const CaseSpec&            spec_;
-  Triangulation<dim>         tria_;
-  FE_Q<dim>                  fe_;
-  DoFHandler<dim>            dh_;
-  AffineConstraints<double>  constraints_;
-  SparsityPattern            sp_;
-  SparseMatrix<double>       mass_matrix_;
-  SparseMatrix<double>       stiffness_matrix_;
-  SparseMatrix<double>       system_matrix_;
-  Vector<double>             solution_;
-  Vector<double>             old_solution_;
-  Vector<double>             system_rhs_;
+  const CaseSpec&                     spec_;
+  Triangulation<dim>                  tria_;
+  bool                                is_simplex_ = false;
+  std::unique_ptr<FiniteElement<dim>> fe_;
+  DoFHandler<dim>                     dh_;
+  AffineConstraints<double>           constraints_;
+  SparsityPattern                     sp_;
+  SparseMatrix<double>                mass_matrix_;
+  SparseMatrix<double>                stiffness_matrix_;
+  SparseMatrix<double>                system_matrix_;
+  Vector<double>                      solution_;
+  Vector<double>                      old_solution_;
+  Vector<double>                      system_rhs_;
 
   // time config
   double t0_    = 0.0, t_end_ = 1.0, dt_ = 0.01;
   std::string time_scheme_ = "backward_euler";
 
   void make_mesh() {
-    GridGenerator::subdivided_hyper_cube(tria_, spec_.mesh.resolution, 0.0, 1.0);
+    is_simplex_ = oracle_util::make_mesh<dim>(spec_, tria_);
+    fe_ = oracle_util::make_scalar_fe<dim>(spec_.fem.degree, is_simplex_);
+
     if (!spec_.time_cfg.is_null()) {
       t0_          = spec_.time_cfg.value("t0",     0.0);
       t_end_       = spec_.time_cfg.value("t_end",  1.0);
@@ -111,10 +120,8 @@ class HeatOracle {
   }
 
   void setup_system() {
-    dh_.distribute_dofs(fe_);
+    dh_.distribute_dofs(*fe_);
     constraints_.clear();
-
-    // We will update BCs each time step; just close empty constraints for sparsity.
     constraints_.close();
 
     DynamicSparsityPattern dsp(dh_.n_dofs());
@@ -137,12 +144,12 @@ class HeatOracle {
     FunctionParser<dim> kappa_func(1);
     initialize_parser<dim>(kappa_func, kappa_expr, false);
 
-    QGauss<dim> quad(fe_.degree + 1);
-    FEValues<dim> fev(fe_, quad,
-                    update_values | update_gradients |
-                    update_JxW_values | update_quadrature_points);
+    const auto quad = oracle_util::make_quadrature<dim>(*fe_);
+    FEValues<dim> fev(*fe_, quad,
+                      update_values | update_gradients |
+                      update_JxW_values | update_quadrature_points);
 
-    const unsigned int n = fe_.n_dofs_per_cell();
+    const unsigned int n = fe_->n_dofs_per_cell();
     FullMatrix<double> Me(n, n), Ke(n, n);
     std::vector<types::global_dof_index> ids(n);
 
@@ -195,7 +202,8 @@ class HeatOracle {
     if (has_src)
       initialize_parser<dim>(src_func, src_expr, true);
 
-    QGauss<dim> quad(fe_.degree + 1);
+    // Quadrature consistent with the mesh cell type (simplex or hypercube).
+    const auto quad = oracle_util::make_quadrature<dim>(*fe_);
 
     double t = t0_;
     while (t < t_end_ - 1e-12 * dt_) {
@@ -223,21 +231,22 @@ class HeatOracle {
       // Add source term contribution dt·∫f v dx
       if (has_src) {
         src_func.set_time(t);
-        FEValues<dim> fev(fe_, quad,
-                        update_values | update_JxW_values | update_quadrature_points);
-        const unsigned int n = fe_.n_dofs_per_cell();
-        Vector<double>     fe(n);
+        FEValues<dim> fev(*fe_, quad,
+                          update_values | update_JxW_values |
+                          update_quadrature_points);
+        const unsigned int n = fe_->n_dofs_per_cell();
+        Vector<double>     fe_rhs(n);
         std::vector<types::global_dof_index> ids(n);
         for (auto& cell : dh_.active_cell_iterators()) {
-          fev.reinit(cell); fe = 0;
+          fev.reinit(cell); fe_rhs = 0;
           for (unsigned int q = 0; q < quad.size(); ++q) {
             const double f = src_func.value(fev.quadrature_point(q));
             for (unsigned int i = 0; i < n; ++i)
-              fe(i) += dt * f * fev.shape_value(i, q) * fev.JxW(q);
+              fe_rhs(i) += dt * f * fev.shape_value(i, q) * fev.JxW(q);
           }
           cell->get_dof_indices(ids);
           for (unsigned int i = 0; i < n; ++i)
-            system_rhs_(ids[i]) += fe(i);
+            system_rhs_(ids[i]) += fe_rhs(i);
         }
       }
 

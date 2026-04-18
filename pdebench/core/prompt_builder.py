@@ -62,8 +62,129 @@ EQUATION_TEMPLATES = {
         "title": "Linear Elasticity (2D, Small Strain)",
         "equation": "-∇·σ(u) = f   in Ω\n  u = g        on ∂Ω\n  σ(u) = 2μ ε(u) + λ tr(ε(u)) I,   ε(u)=sym(∇u)",
         "description": "Vector-valued elliptic system; use a conforming vector FE space. CG+AMG or GMRES+AMG/direct is acceptable depending on conditioning."
+    },
+    "wave": {
+        "title": "Wave Equation (2D, Transient)",
+        "equation": "∂²u/∂t² - c² Δu = f   in Ω × (0,T]\n  u = g                  on ∂Ω × (0,T]\n  u(x,0)      = u₀(x)   in Ω\n  ∂u/∂t(x,0) = v₀(x)   in Ω",
+        "description": "Second-order hyperbolic equation; use a second-order-in-time scheme such as Newmark-β (β=1/4, γ=1/2) or leap-frog. The Newmark average-acceleration scheme (θ=1/4) is unconditionally stable."
+    },
+    "burgers": {
+        "title": "Burgers' Equation (2D, Transient, Nonlinear)",
+        "equation": "∂u/∂t + u·∇u - ν Δu = f   in Ω × (0,T]\n  u = g                      on ∂Ω × (0,T]\n  u(x,0) = u₀(x)             in Ω",
+        "description": "Nonlinear parabolic equation; semi-implicit linearization (treat the convection term u_n·∇u explicitly, diffusion implicitly) is recommended. Small ν may require stabilization."
     }
 }
+
+
+def format_domain(domain_cfg: Dict) -> str:
+    """根据 oracle_config.domain 生成人类可读的域描述字符串。
+    与 oracle/common.py 和 oracle/firedrake_oracle/common.py 的 create_mesh() 保持一致。
+    """
+    domain_type = domain_cfg.get("type", "unit_square")
+    params = domain_cfg.get("geometry_params", {})
+
+    if domain_type == "unit_square":
+        return "[0,1] × [0,1] (unit square)"
+
+    if domain_type == "unit_cube":
+        return "[0,1] × [0,1] × [0,1] (unit cube)"
+
+    if domain_type == "l_shape":
+        verts = params.get("vertices")
+        if verts:
+            vstr = ", ".join(f"({v[0]},{v[1]})" for v in verts)
+            return f"L-shaped polygon, vertices: [{vstr}]"
+        # 旧格式兼容
+        ob = domain_cfg.get("outer_bbox", [0, 1, 0, 1])
+        cb = domain_cfg.get("cutout_bbox", [0.5, 1, 0.5, 1])
+        return (f"L-shaped domain: outer [{ob[0]},{ob[1]}]×[{ob[2]},{ob[3]}], "
+                f"top-right cutout [{cb[0]},{cb[1]}]×[{cb[2]},{cb[3]}]")
+
+    if domain_type == "circle":
+        c, r = params.get("center", [0.5, 0.5]), params.get("radius", 0.5)
+        return f"Circular domain: center=({c[0]},{c[1]}), radius={r}"
+
+    if domain_type == "annulus":
+        c = params.get("center", [0, 0])
+        r_i, r_o = params.get("inner_r", 0.5), params.get("outer_r", 1.0)
+        return f"Annular (ring) domain: center=({c[0]},{c[1]}), inner_r={r_i}, outer_r={r_o}"
+
+    if domain_type == "square_with_hole":
+        out = params.get("outer", [0, 1, 0, 1])
+        ostr = f"[{out[0]},{out[1]}]×[{out[2]},{out[3]}]"
+        ih = params.get("inner_hole", {})
+        ht = ih.get("type", "circle")
+        if ht == "circle":
+            c, r = ih.get("center", [0.5, 0.5]), ih.get("radius", 0.2)
+            return f"Square {ostr} with circular hole: center=({c[0]},{c[1]}), radius={r}"
+        if ht == "rect":
+            b = ih.get("bbox", [0.4, 0.6, 0.4, 0.6])
+            return f"Square {ostr} with rectangular hole: [{b[0]},{b[1]}]×[{b[2]},{b[3]}]"
+        # polygon
+        verts = ih.get("vertices", [])
+        vstr = ", ".join(f"({v[0]},{v[1]})" for v in verts)
+        return f"Square {ostr} with polygonal hole: [{vstr}]"
+
+    if domain_type == "multi_hole":
+        out = params.get("outer", [0, 1, 0, 1])
+        ostr = f"[{out[0]},{out[1]}]×[{out[2]},{out[3]}]"
+        holes = params.get("holes", [])
+        hstr = "; ".join(f"center=({h['c'][0]},{h['c'][1]}), r={h['r']}" for h in holes)
+        return f"Square {ostr} with {len(holes)} circular hole(s): [{hstr}]"
+
+    if domain_type == "t_junction":
+        h = params.get("horizontal_rect", [0.0, 1.0, 0.4, 0.6])
+        v = params.get("vertical_rect", [0.4, 0.6, 0.0, 0.5])
+        return (f"T-junction domain: horizontal [{h[0]},{h[1]}]×[{h[2]},{h[3]}], "
+                f"vertical [{v[0]},{v[1]}]×[{v[2]},{v[3]}]")
+
+    if domain_type == "sector":
+        c, r = params.get("center", [0, 0]), params.get("radius", 1.0)
+        ang = params.get("angle", 90)
+        return f"Circular sector: center=({c[0]},{c[1]}), radius={r}, angle={ang}°"
+
+    if domain_type in ("star", "star_shape"):
+        c = params.get("center", [0, 0])
+        n = params.get("points", 5)
+        r_i, r_o = params.get("inner_r", 0.3), params.get("outer_r", 0.7)
+        return f"{n}-point star domain: center=({c[0]},{c[1]}), inner_r={r_i}, outer_r={r_o}"
+
+    if domain_type == "gear":
+        c = params.get("center", [0, 0])
+        teeth = params.get("teeth", 8)
+        b_r, t_h = params.get("base_r", 0.5), params.get("tooth_h", 0.2)
+        return f"Gear domain: center=({c[0]},{c[1]}), {teeth} teeth, base_r={b_r}, tooth_h={t_h}"
+
+    if domain_type == "eccentric_annulus":
+        oc = params.get("outer_circle", {"c": [0, 0], "r": 1.0})
+        ic = params.get("inner_circle", {"c": [0.2, 0], "r": 0.4})
+        return (f"Eccentric annulus: outer circle center=({oc['c'][0]},{oc['c'][1]}), r={oc['r']}; "
+                f"inner circle center=({ic['c'][0]},{ic['c'][1]}), r={ic['r']}")
+
+    if domain_type == "dumbbell":
+        # oracle 同时支持 left_center/right_center 和 left_circle/right_circle 两种 key
+        lc = params.get("left_circle", params.get("left_center", {"c": [0.25, 0.5], "r": 0.25}))
+        rc = params.get("right_circle", params.get("right_center", {"c": [0.75, 0.5], "r": 0.25}))
+        if isinstance(lc, dict) and "c" in lc:
+            lpos, lr = lc["c"], lc.get("r", 0.25)
+        else:
+            lpos, lr = lc, params.get("radius", 0.2)
+        if isinstance(rc, dict) and "c" in rc:
+            rpos, rr = rc["c"], rc.get("r", 0.25)
+        else:
+            rpos, rr = rc, params.get("radius", 0.2)
+        bridge = params.get("bridge", {})
+        bstr = (f"bridge x=[{bridge.get('x_min', lpos[0])},{bridge.get('x_max', rpos[0])}], "
+                f"y=[{bridge.get('y_min', 0.4)},{bridge.get('y_max', 0.6)}]"
+                if bridge else f"bar_width={params.get('bar_width', 0.2)}")
+        return (f"Dumbbell domain: left circle center=({lpos[0]},{lpos[1]}), r={lr}; "
+                f"right circle center=({rpos[0]},{rpos[1]}), r={rr}; {bstr}")
+
+    if domain_type == "periodic_square":
+        bounds = params.get("bounds", params.get("extents", [0, 1, 0, 1]))
+        return f"Periodic square: [{bounds[0]},{bounds[1]}]×[{bounds[2]},{bounds[3]}] (periodic BCs on all sides)"
+
+    return f"{domain_type} domain (see oracle_config.domain for geometry parameters)"
 
 
 def format_coefficient(coeff: Dict) -> str:
@@ -137,6 +258,19 @@ def generate_prompt(
         if initial_condition:
             prompt += f"**Initial Condition:** u0 = {initial_condition}\n"
 
+        # 边界条件（no_exact case 无 manufactured_solution 可推断 BC，必须显式渲染）
+        bc_cfg = case['oracle_config'].get('bc', {})
+        dirichlet = bc_cfg.get('dirichlet', {})
+        if dirichlet:
+            bc_on = dirichlet.get('on', 'all')
+            bc_value = dirichlet.get('value', '0.0')
+            prompt += f"\n**Boundary Condition (Dirichlet):** u = {bc_value}   on ∂Ω ({bc_on})\n"
+        neumann = bc_cfg.get('neumann', {})
+        if neumann:
+            nm_on = neumann.get('on', 'part')
+            nm_value = neumann.get('value', '0.0')
+            prompt += f"\n**Boundary Condition (Neumann):** ∂u/∂n = {nm_value}   on Γ_N ({nm_on})\n"
+
     # 添加系数
     coefficients = pde_config.get('coefficients', {})
     if coefficients:
@@ -182,14 +316,46 @@ def generate_prompt(
         elif lam is not None and mu is not None:
             prompt += f"\n**Material Parameters:** λ = {lam}, μ = {mu}\n"
 
-    # 时间相关参数
+    if pde_type == 'wave':
+        params = pde_config.get('pde_params', {})
+        c = params.get('c', 1.0)
+        prompt += f"\n**Wave Speed:** c = {c}\n"
+        ic = pde_config.get('initial_condition')
+        iv = pde_config.get('initial_velocity')
+        if ic:
+            prompt += f"**Initial Condition u₀:** {ic}\n"
+        if iv:
+            prompt += f"**Initial Velocity v₀:** {iv}\n"
+        prompt += "⚠️ Implement a **second-order** time scheme (e.g. Newmark-β with β=1/4, γ=1/2).\n"
+
+    if pde_type == 'burgers':
+        params = pde_config.get('pde_params', {})
+        nu_val = params.get('nu', 0.01)
+        t_final = pde_config.get('t_final', 0.1)
+        dt_val = pde_config.get('dt', 0.01)
+        prompt += f"""
+**Burgers Parameters:**
+- ν (viscosity) = {nu_val}
+- T_final = {t_final}
+- dt (suggested) = {dt_val}
+"""
+        if nu_val < 0.05:
+            prompt += "⚠️ Low viscosity — consider SUPG stabilization or sufficiently fine mesh.\n"
+        prompt += "Use **semi-implicit linearization**: treat u_n·∇u explicitly, diffusion implicitly.\n"
+
+    # 时间相关参数（适用于 heat / convection_diffusion_transient / wave 等含 time 字典的方程）
     if 'time' in pde_config:
         time_cfg = pde_config['time']
+        t0 = time_cfg.get('t0', 0.0)
+        t_end = time_cfg.get('t_end', 1.0)
+        dt = time_cfg.get('dt', 0.01)
+        scheme = time_cfg.get('scheme', 'backward_euler' if pde_type != 'wave' else 'newmark_beta')
         prompt += f"""
 **Time Parameters:**
-- t_end = {time_cfg.get('t_end', 1.0)}
-- dt (suggested) = {time_cfg.get('dt', 0.01)}
-- scheme: {time_cfg.get('scheme', 'backward_euler')}
+- t0 = {t0}
+- t_end = {t_end}
+- dt (suggested) = {dt}
+- scheme: {scheme}
 """
 
     # 网格和输出配置
@@ -214,12 +380,50 @@ def generate_prompt(
     else:
         lib_name = "**dolfinx** (FEniCSx)"
 
-    prompt += f"""
-**Domain:** [0,1] × [0,1] (unit square)
+    # 域描述
+    domain_cfg = case['oracle_config'].get('domain', {'type': 'unit_square'})
+    domain_desc = format_domain(domain_cfg)
+    is_complex_domain = domain_cfg.get('type', 'unit_square') not in ('unit_square', 'unit_cube')
 
-**Output Requirements (handled by evaluator):**
-- Evaluator will sample the solution on a uniform grid (specific resolution is determined by the evaluator)
-- Output field: {output_field}{vector_field_note}
+    # 复杂域 NaN 采样说明（按库分支）
+    complex_domain_note = ""
+    if is_complex_domain:
+        domain_type = domain_cfg.get("type", "")
+        if solver_library == "firedrake":
+            complex_domain_note = f"""
+- ⚠️  **Non-rectangular domain** (`{domain_type}`): the output grid `bbox` may extend \
+beyond Ω. Build your mesh from `case_spec["domain"]` (type + geometry_params). \
+Use `u.at(coords, dont_raise=True)` to evaluate — Firedrake returns `None` for \
+points outside the mesh; convert to `np.nan` so the NaN-safe error metric ignores them:
+  ```python
+  domain = case_spec["domain"]  # type, geometry_params
+  raw = u_h.at(coords, dont_raise=True)
+  values = np.array([float(v) if v is not None else np.nan for v in raw], dtype=float)
+  ```"""
+        elif solver_library != "dealii":
+            complex_domain_note = f"""
+- ⚠️  **Non-rectangular domain** (`{domain_type}`): the output grid `bbox` may extend \
+beyond Ω. Build your mesh from `case_spec["domain"]` (type + geometry_params). \
+Use dolfinx collision detection so exterior points become `np.nan` \
+(the NaN-safe error metric ignores them):
+  ```python
+  domain = case_spec["domain"]  # type, geometry_params
+  from dolfinx import geometry
+  bb_tree = geometry.bb_tree(msh, msh.topology.dim)
+  cell_candidates = geometry.compute_collisions_points(bb_tree, points)
+  colliding_cells = geometry.compute_colliding_cells(msh, cell_candidates, points)
+  values = np.full(len(points), np.nan)
+  for i, links in enumerate(colliding_cells):
+      if len(links) > 0:
+          values[i] = float(u_h.eval(points[i:i+1], links[:1]))
+  ```"""
+
+    prompt += f"""
+**Domain:** {domain_desc}
+
+**Output Requirements:**
+- You must sample your solution onto the uniform grid from `case_spec["output"]["grid"]` and return it as a numpy array of shape `(ny, nx)`
+- Output field: {output_field}{vector_field_note}{complex_domain_note}
 
 ---
 
@@ -289,9 +493,13 @@ Write a Python module using {lib_name} that exposes:
 def solve(case_spec: dict) -> dict:
     \"\"\"
     Return a dict with:
-    - "u": u_grid, 2-D numpy array of the solution sampled on a uniform grid.
-         Choose any grid resolution you find appropriate; the evaluator will
-         automatically resample your output to its reference grid before scoring.
+    - "u": u_grid, 2-D numpy array of shape **(ny, nx)** sampled on the uniform
+         grid specified in case_spec["output"]["grid"]:
+           nx   = case_spec["output"]["grid"]["nx"]
+           ny   = case_spec["output"]["grid"]["ny"]
+           bbox = case_spec["output"]["grid"]["bbox"]  # [xmin, xmax, ymin, ymax]
+         Use your FEM solution's eval() to interpolate onto these nx*ny points.
+         ⚠️  Output shape MUST be exactly (ny, nx); wrong shape will fail evaluation.
     - "solver_info": dict with fields organized by PDE type:
     
       ALWAYS REQUIRED (all PDEs):

@@ -98,9 +98,13 @@ def load_agent_config(agent_name: str) -> Dict:
 def load_benchmark_cases(
     data_file: Path,
     case_filter: Optional[List[str]] = None,
-    equation_types: Optional[List[str]] = None
+    equation_types: Optional[List[str]] = None,
+    solver_library: Optional[str] = None,
 ) -> List[Dict]:
-    """从benchmark.jsonl加载cases"""
+    """从benchmark.jsonl加载cases。
+
+    若 case 含 supported_libraries 字段，则自动跳过当前 solver_library 不支持的 case。
+    """
     cases = []
     eq_types = [t.lower() for t in equation_types] if equation_types else None
     with open(data_file) as f:
@@ -112,6 +116,10 @@ def load_benchmark_cases(
                 if eq_types is not None:
                     pde_type = case.get('oracle_config', {}).get('pde', {}).get('type', '').lower()
                     if pde_type not in eq_types:
+                        continue
+                if solver_library is not None:
+                    supported = case.get('supported_libraries')
+                    if supported is not None and solver_library not in supported:
                         continue
                 cases.append(case)
     return cases
@@ -298,11 +306,10 @@ def compute_error(agent_output: Path, oracle_info: Dict) -> float:
             # 兼容旧缓存（无 reference_shape 字段，无 NaN）
             u_ref = u_ref.reshape(u_agent.shape) if u_ref.size == u_agent.size else u_ref
         
-        # 处理形状不匹配
+        # 形状不匹配直接报失败，不做插值
         if u_agent.shape != u_ref.shape:
-            from scipy.ndimage import zoom
-            factors = np.array(u_ref.shape) / np.array(u_agent.shape)
-            u_agent = zoom(u_agent, factors, order=1)
+            print(f"   ⚠️  Shape mismatch: agent={u_agent.shape}, expected={u_ref.shape}")
+            return float('nan')
         
         # NaN-safe 相对 L2 误差：跳过域外点（u_ref 为 NaN）及 agent 输出中的 NaN
         mask = ~(np.isnan(u_agent) | np.isnan(u_ref))
@@ -1406,9 +1413,9 @@ def run_benchmark(
         agent_type = "Code Agent" if is_code_agent else "LLM"
         print(f"   ✓ {agent}: {agent_type}")
     
-    # 加载cases
-    cases = load_benchmark_cases(data_file, case_filter, equation_types)
-    print(f"\n📊 Loaded {len(cases)} cases from benchmark")
+    # 加载cases（按 supported_libraries 自动过滤当前后端不支持的 case）
+    cases = load_benchmark_cases(data_file, case_filter, equation_types, solver_library=solver_library)
+    print(f"\n📊 Loaded {len(cases)} cases from benchmark (library={solver_library})")
     
     # 🔍 如果是批量评估模式，自动过滤出存在solver的case
     if existing_solver_dir:
@@ -1867,8 +1874,8 @@ def main():
     parser.add_argument(
         '--data',
         type=Path,
-        default=Path('data/benchmark.jsonl'),
-        help='Benchmark data file (default: data/benchmark.jsonl)'
+        default=Path('data/benchmark_merged.jsonl'),
+        help='Benchmark data file (default: data/benchmark_merged.jsonl)'
     )
     
     parser.add_argument(

@@ -21,13 +21,14 @@
  *     Uses VectorTools::point_value with MappingFE (correct simplex mapping)
  *     in a per-point loop with try-catch.
  *     Points outside the domain (bbox corners outside the L-shape, T-shape,
- *     etc.) catch the exception and are set to 0.0, matching the DOLFINx
- *     oracle's nan_to_num convention.
+ *     etc.) catch the exception and are set to NaN, matching the DOLFINx
+ *     oracle convention so that error computation ignores outside-domain points.
  */
 
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -151,7 +152,7 @@ bool tria_is_simplex(const dealii::DoFHandler<dim>& dh) {
 //   unit square/cube where all bbox points are inside the domain).
 // Simplex mesh  : VectorTools::point_value with MappingFE (correct simplex
 //   reference-to-physical mapping), per-point with try-catch so that bbox
-//   corners outside the complex domain are silently set to 0.
+//   corners outside the complex domain are silently set to NaN.
 // ---------------------------------------------------------------------------
 template <int dim>
 std::vector<double>
@@ -175,7 +176,7 @@ eval_scalar_at_points(const dealii::DoFHandler<dim>&         dof_handler,
         values[i] = dealii::VectorTools::point_value(
             mapping, dof_handler, solution, pts[i]);
       } catch (...) {
-        values[i] = 0.0;  // point is outside the complex domain → 0
+        values[i] = std::numeric_limits<double>::quiet_NaN();  // outside domain → NaN
       }
     }
   }
@@ -188,7 +189,7 @@ eval_scalar_at_points(const dealii::DoFHandler<dim>&         dof_handler,
 //
 // Same dual strategy for vector-valued FE solutions (Stokes, linear elast.).
 // Returns a flat array of Vector<double> of length n_pts; each has n_comps
-// entries.  Points outside the domain → zero vector.
+// entries.  Points outside the domain → NaN vector (magnitude also NaN).
 // ---------------------------------------------------------------------------
 template <int dim>
 std::vector<dealii::Vector<double>>
@@ -212,7 +213,9 @@ eval_vector_at_points(const dealii::DoFHandler<dim>&         dof_handler,
         dealii::VectorTools::point_value(
             mapping, dof_handler, solution, pts[i], values[i]);
       } catch (...) {
-        values[i] = 0.0;
+        // outside domain → NaN in every component so magnitude is also NaN
+        for (unsigned int d = 0; d < n_comps; ++d)
+          values[i][d] = std::numeric_limits<double>::quiet_NaN();
       }
     }
   }
