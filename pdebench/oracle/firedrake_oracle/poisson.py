@@ -33,7 +33,7 @@ class FiredrakePoissonSolver:
         msh = create_mesh(case_spec["domain"], case_spec["mesh"])
         V = create_scalar_space(msh, case_spec["fem"]["family"], case_spec["fem"]["degree"])
         x = SpatialCoordinate(msh)
-        dim = msh.geometric_dimension()
+        dim = msh.geometric_dimension
 
         pde_cfg = case_spec["pde"]
         coeffs = pde_cfg.get("coefficients", {})

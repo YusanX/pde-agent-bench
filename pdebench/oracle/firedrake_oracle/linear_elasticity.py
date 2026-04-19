@@ -123,7 +123,7 @@ class FiredrakeLinearElasticitySolver:
         family = case_spec["fem"].get("family", "Lagrange")
         V = create_vector_space(msh, family, degree)
         x = SpatialCoordinate(msh)
-        dim = msh.geometric_dimension()
+        dim = msh.geometric_dimension
 
         pde_cfg = case_spec["pde"]
         params = pde_cfg.get("pde_params", {})

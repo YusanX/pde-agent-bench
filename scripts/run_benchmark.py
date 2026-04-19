@@ -150,9 +150,8 @@ def run_oracle(
     docker_image:   覆盖默认镜像名
     """
     case_id = case['id']
-    # 缓存 key 包含库名和执行模式，避免混用
-    cache_suffix = f"_{solver_library}" if solver_library != "dolfinx" else ""
-    cache_file = cache_dir / f"{case_id}{cache_suffix}.json"
+    # 缓存按 solver_library 子目录隔离，文件名直接用 case_id
+    cache_file = cache_dir / f"{case_id}.json"
     
     # 检查缓存
     if cache_file.exists():
@@ -1451,7 +1450,7 @@ def run_benchmark(
         print("❌ No cases to evaluate!")
         sys.exit(1)
     
-    oracle_cache_dir = output_dir / ".oracle_cache"
+    oracle_cache_dir = output_dir / ".oracle_cache" / solver_library
     all_results = {}
     
     for agent_name in agents:
@@ -1459,7 +1458,7 @@ def run_benchmark(
         print(f"# Agent: {agent_name}")
         print(f"{'#'*80}")
         
-        agent_output = output_dir / f"{agent_name}"
+        agent_output = output_dir / agent_name / solver_library
         agent_results = []
         
         for i, case in enumerate(cases, 1):
@@ -1509,6 +1508,7 @@ def run_benchmark(
         summary = compute_summary(agent_name, agent_results)
         
         # 保存汇总
+        agent_output.mkdir(parents=True, exist_ok=True)
         with open(agent_output / "summary.json", 'w') as f:
             json.dump(summary, f, indent=2)
         

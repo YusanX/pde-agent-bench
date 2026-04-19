@@ -176,6 +176,7 @@ class BiharmonicSolver:
             ref_V = create_scalar_space(ref_msh, ref_fem_spec["family"], ref_fem_spec["degree"])
             ref_x = ufl.SpatialCoordinate(ref_msh)
             ref_f = _rhs_scalar(ref_msh, ref_x, source_expr)
+            ref_dx = ufl.Measure("dx", domain=ref_msh)
 
             ref_petsc = {
                 "ksp_type": ref_solver.get("ksp_type", petsc_options["ksp_type"]),
@@ -187,8 +188,8 @@ class BiharmonicSolver:
             # w_ref
             ref_w = ufl.TrialFunction(ref_V)
             ref_v = ufl.TestFunction(ref_V)
-            ref_a_w = ufl.inner(ufl.grad(ref_w), ufl.grad(ref_v)) * dx
-            ref_L_w = ref_f * ref_v * dx
+            ref_a_w = ufl.inner(ufl.grad(ref_w), ufl.grad(ref_v)) * ref_dx
+            ref_L_w = ref_f * ref_v * ref_dx
             ref_bcs_w = [build_dirichlet_bc(ref_msh, ref_V, "0.0")]
             ref_w_problem = LinearProblem(
                 ref_a_w,
@@ -202,8 +203,8 @@ class BiharmonicSolver:
             # u_ref
             ref_u = ufl.TrialFunction(ref_V)
             ref_q = ufl.TestFunction(ref_V)
-            ref_a_u = ufl.inner(ufl.grad(ref_u), ufl.grad(ref_q)) * dx
-            ref_L_u = ref_w_h * ref_q * dx
+            ref_a_u = ufl.inner(ufl.grad(ref_u), ufl.grad(ref_q)) * ref_dx
+            ref_L_u = ref_w_h * ref_q * ref_dx
             ref_bc_cfg = case_spec.get("bc", {}).get("dirichlet", {})
             ref_bc_value = ref_bc_cfg.get("value", "0.0")
             ref_bcs_u = [build_dirichlet_bc(ref_msh, ref_V, ref_bc_value)]

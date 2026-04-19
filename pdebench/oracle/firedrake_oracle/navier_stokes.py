@@ -189,7 +189,7 @@ class FiredrakeNavierStokesOracle:
         degree_p = case_spec["fem"].get("degree_p", 1)
         W = create_mixed_space(msh, degree_u, degree_p)
         x = SpatialCoordinate(msh)
-        dim = msh.geometric_dimension()
+        dim = msh.geometric_dimension
 
         pde_cfg = case_spec["pde"]
         params = pde_cfg.get("pde_params", {})

@@ -556,24 +556,40 @@ def _eval_exact_sym_on_grid(
     t: float = None,
     t_sym=None,
 ) -> np.ndarray:
-    """Evaluate a sympy scalar expression directly on a 2-D uniform grid.
+    """Evaluate a sympy scalar expression directly on a 2-D or 3-D uniform grid.
 
     Uses numpy lambdify — no FEM projection, machine-precision accuracy.
-    Returns shape (ny, nx) matching the sample_scalar_on_grid convention.
+    2-D: returns shape (ny, nx) matching sample_scalar_on_grid convention.
+    3-D: returns shape (nz, ny, nx) matching sample_scalar_on_grid_3d convention.
     """
     bbox = grid_cfg["bbox"]
     nx, ny = int(grid_cfg["nx"]), int(grid_cfg["ny"])
-    xs = np.linspace(bbox[0], bbox[1], nx)
-    ys = np.linspace(bbox[2], bbox[3], ny)
-    X, Y = np.meshgrid(xs, ys, indexing="xy")
+    nz = grid_cfg.get("nz")
+    is_3d = _is_3d_grid(bbox, nz)
 
     expr = u_sym.subs(t_sym, t) if (t is not None and t_sym is not None) else u_sym
     u_func = sp.lambdify(spatial_coords, expr, modules="numpy")
-    result = u_func(X, Y)
 
-    if np.isscalar(result):
-        result = np.full((ny, nx), float(result))
-    return np.asarray(result, dtype=float)
+    if is_3d:
+        nz = int(nz)
+        xs = np.linspace(bbox[0], bbox[1], nx)
+        ys = np.linspace(bbox[2], bbox[3], ny)
+        zs = np.linspace(bbox[4], bbox[5], nz)
+        # "ij" indexing → X[ix,iy,iz]=xs[ix], shape (nx,ny,nz)
+        X, Y, Z = np.meshgrid(xs, ys, zs, indexing="ij")
+        result = u_func(X, Y, Z)
+        if np.isscalar(result):
+            result = np.full((nx, ny, nz), float(result))
+        # Transpose (nx,ny,nz) → (nz,ny,nx) to match _make_grid_coords_3d convention
+        return np.asarray(result, dtype=float).transpose(2, 1, 0)
+    else:
+        xs = np.linspace(bbox[0], bbox[1], nx)
+        ys = np.linspace(bbox[2], bbox[3], ny)
+        X, Y = np.meshgrid(xs, ys, indexing="xy")
+        result = u_func(X, Y)
+        if np.isscalar(result):
+            result = np.full((ny, nx), float(result))
+        return np.asarray(result, dtype=float)
 
 
 def _eval_exact_vec_mag_on_grid(
@@ -583,25 +599,45 @@ def _eval_exact_vec_mag_on_grid(
     t: float = None,
     t_sym=None,
 ) -> np.ndarray:
-    """Evaluate vector magnitude sqrt(sum(ui^2)) directly on a 2-D uniform grid.
+    """Evaluate vector magnitude sqrt(sum(ui^2)) directly on a 2-D or 3-D uniform grid.
 
-    Returns shape (ny, nx) matching sample_vector_magnitude_on_grid convention.
+    2-D: returns shape (ny, nx).
+    3-D: returns shape (nz, ny, nx).
     """
     bbox = grid_cfg["bbox"]
     nx, ny = int(grid_cfg["nx"]), int(grid_cfg["ny"])
-    xs = np.linspace(bbox[0], bbox[1], nx)
-    ys = np.linspace(bbox[2], bbox[3], ny)
-    X, Y = np.meshgrid(xs, ys, indexing="xy")
+    nz = grid_cfg.get("nz")
+    is_3d = _is_3d_grid(bbox, nz)
 
-    mag_sq = np.zeros((ny, nx), dtype=float)
-    for comp_sym in u_sym_vec:
-        expr = comp_sym.subs(t_sym, t) if (t is not None and t_sym is not None) else comp_sym
-        comp_func = sp.lambdify(spatial_coords, expr, modules="numpy")
-        vals = comp_func(X, Y)
-        if np.isscalar(vals):
-            vals = np.full((ny, nx), float(vals))
-        mag_sq += np.asarray(vals, dtype=float) ** 2
-    return np.sqrt(mag_sq)
+    if is_3d:
+        nz = int(nz)
+        xs = np.linspace(bbox[0], bbox[1], nx)
+        ys = np.linspace(bbox[2], bbox[3], ny)
+        zs = np.linspace(bbox[4], bbox[5], nz)
+        X, Y, Z = np.meshgrid(xs, ys, zs, indexing="ij")
+        mag_sq = np.zeros((nx, ny, nz), dtype=float)
+        for comp_sym in u_sym_vec:
+            expr = comp_sym.subs(t_sym, t) if (t is not None and t_sym is not None) else comp_sym
+            comp_func = sp.lambdify(spatial_coords, expr, modules="numpy")
+            vals = comp_func(X, Y, Z)
+            if np.isscalar(vals):
+                vals = np.full((nx, ny, nz), float(vals))
+            mag_sq += np.asarray(vals, dtype=float) ** 2
+        # Transpose (nx,ny,nz) → (nz,ny,nx)
+        return np.sqrt(mag_sq).transpose(2, 1, 0)
+    else:
+        xs = np.linspace(bbox[0], bbox[1], nx)
+        ys = np.linspace(bbox[2], bbox[3], ny)
+        X, Y = np.meshgrid(xs, ys, indexing="xy")
+        mag_sq = np.zeros((ny, nx), dtype=float)
+        for comp_sym in u_sym_vec:
+            expr = comp_sym.subs(t_sym, t) if (t is not None and t_sym is not None) else comp_sym
+            comp_func = sp.lambdify(spatial_coords, expr, modules="numpy")
+            vals = comp_func(X, Y)
+            if np.isscalar(vals):
+                vals = np.full((ny, nx), float(vals))
+            mag_sq += np.asarray(vals, dtype=float) ** 2
+        return np.sqrt(mag_sq)
 
 
 # =============================================================================

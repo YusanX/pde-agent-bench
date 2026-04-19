@@ -215,7 +215,7 @@ def main():
     data_file = (
         Path(args.data_file)
         if args.data_file
-        else Path(__file__).parent.parent / 'data' / 'benchmark_merged.jsonl'
+        else Path(__file__).parent.parent / 'data' / 'benchmark_v2.jsonl'
     )
 
     if not data_file.exists():

@@ -243,6 +243,10 @@ def parse_expression(expr_str, x, t=None):
         if e.func == sp.sin: return ufl.sin(to_ufl(e.args[0]))
         if e.func == sp.cos: return ufl.cos(to_ufl(e.args[0]))
         if e.func == sp.exp: return ufl.exp(to_ufl(e.args[0]))
+        if e.func == sp.tanh: return ufl.tanh(to_ufl(e.args[0]))
+        if e.func == sp.sqrt: return ufl.sqrt(to_ufl(e.args[0]))
+        if e.func == sp.Abs: return ufl.Abs(to_ufl(e.args[0]))
+        if e.func == sp.log: return ufl.ln(to_ufl(e.args[0]))
         return ufl.as_ufl(float(e.evalf()))
     return to_ufl(expr_sympy)
 
