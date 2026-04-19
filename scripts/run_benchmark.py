@@ -24,8 +24,14 @@ PDEBench 统一评测入口
     # 批量评估已有目录下的所有solver（新功能）
     python run_benchmark.py --agent qwen3-max --eval-existing-dir results/qwen3-max
 
+    # 使用 v1 数据集（仅 dolfinx）
+    python run_benchmark.py --agent gpt-4o --version v1
+
+    # 使用 v2 数据集（支持多后端）
+    python run_benchmark.py --agent gpt-4o --version v2 --solver-library firedrake
+
 流程:
-    1. 从 data/benchmark.jsonl 加载cases
+    1. 从 data/benchmark_v1.jsonl 或 data/benchmark_v2.jsonl 加载cases（由 --version 决定）
     2. 对每个case:
        a. 运行oracle获取参考解（带缓存）
        b. 生成prompt
@@ -1872,6 +1878,16 @@ def main():
     )
     
     parser.add_argument(
+        '--version',
+        choices=['v1', 'v2'],
+        default=None,
+        help=(
+            'Dataset version: "v1" loads data/benchmark_v1.jsonl and forces dolfinx backend; '
+            '"v2" loads data/benchmark_v2.jsonl with full multi-backend support.'
+        )
+    )
+
+    parser.add_argument(
         '--data',
         type=Path,
         default=Path('data/benchmark_merged.jsonl'),
@@ -1938,7 +1954,17 @@ def main():
     )
 
     args = parser.parse_args()
-    
+
+    # --version 覆盖逻辑
+    if args.version == 'v1':
+        if args.solver_library != 'dolfinx':
+            print(f"Error: version v1 dataset only supports the dolfinx backend, "
+                  f"but '--solver-library {args.solver_library}' was specified.")
+            sys.exit(1)
+        args.data = Path('data/benchmark_v1.jsonl')
+    elif args.version == 'v2':
+        args.data = Path('data/benchmark_v2.jsonl')
+
     # 切换到项目根目录
     root_dir = Path(__file__).parent.parent
     data_file = root_dir / args.data
