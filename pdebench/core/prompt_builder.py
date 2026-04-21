@@ -262,14 +262,30 @@ def generate_prompt(
         bc_cfg = case['oracle_config'].get('bc', {})
         dirichlet = bc_cfg.get('dirichlet', {})
         if dirichlet:
-            bc_on = dirichlet.get('on', 'all')
-            bc_value = dirichlet.get('value', '0.0')
-            prompt += f"\n**Boundary Condition (Dirichlet):** u = {bc_value}   on ∂Ω ({bc_on})\n"
+            prompt += "\n**Boundary Conditions (Dirichlet):**\n"
+            # dirichlet 可能是单个 dict，也可能是多段 list（向量场 / 分段边界）
+            entries = dirichlet if isinstance(dirichlet, list) else [dirichlet]
+            for entry in entries:
+                bc_on = entry.get('on', 'all')
+                bc_value = entry.get('value', '0.0')
+                # value 可能是向量列表，转为可读字符串
+                if isinstance(bc_value, list):
+                    bc_value_str = f"[{', '.join(str(v) for v in bc_value)}]"
+                else:
+                    bc_value_str = str(bc_value)
+                prompt += f"- u = {bc_value_str}   on {bc_on}\n"
         neumann = bc_cfg.get('neumann', {})
         if neumann:
-            nm_on = neumann.get('on', 'part')
-            nm_value = neumann.get('value', '0.0')
-            prompt += f"\n**Boundary Condition (Neumann):** ∂u/∂n = {nm_value}   on Γ_N ({nm_on})\n"
+            prompt += "\n**Boundary Conditions (Neumann):**\n"
+            entries = neumann if isinstance(neumann, list) else [neumann]
+            for entry in entries:
+                nm_on = entry.get('on', 'part')
+                nm_value = entry.get('value', '0.0')
+                if isinstance(nm_value, list):
+                    nm_value_str = f"[{', '.join(str(v) for v in nm_value)}]"
+                else:
+                    nm_value_str = str(nm_value)
+                prompt += f"- ∂u/∂n = {nm_value_str}   on {nm_on}\n"
 
     # 添加系数
     coefficients = pde_config.get('coefficients', {})
