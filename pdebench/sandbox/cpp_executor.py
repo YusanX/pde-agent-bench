@@ -259,10 +259,10 @@ class CppExecutor:
     def _solver_meta_file(build_dir: Path) -> Path:
         return build_dir / "solver_meta.json"
 
-    @staticmethod
-    def _build_signature(deal_ii_dir: str) -> Dict[str, Any]:
+    def _build_signature(self, deal_ii_dir: str) -> Dict[str, Any]:
         return {
             "deal_ii_dir": deal_ii_dir,
+            "docker_image": self._docker_image or "",
             "cmake_template_sha256": hashlib.sha256(_CMAKE_TEMPLATE.encode("utf-8")).hexdigest(),
         }
 
