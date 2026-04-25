@@ -23,6 +23,7 @@ on the unit square [0,1]² and write output in the required format.
 #include <deal.II/lac/full_matrix.h>
 #include <deal.II/lac/precondition.h>
 #include <deal.II/lac/solver_cg.h>
+#include <deal.II/lac/solver_control.h>     // ReductionControl, SolverControl
 #include <deal.II/lac/solver_gmres.h>
 #include <deal.II/lac/sparse_direct.h>      // SparseDirectUMFPACK
 #include <deal.II/lac/sparse_matrix.h>
@@ -217,6 +218,9 @@ for (auto& cell : dof_handler.active_cell_iterators()) {
 ```cpp
 #include <deal.II/numerics/fe_field_function.h>
 
+// IMPORTANT: deal.II 9.x API — template args are <dim, VectorType, spacedim>.
+// Use the 1-argument form below. The OLD form <dim, DoFHandler<dim>, VectorType>
+// no longer compiles and must NOT be used.
 Functions::FEFieldFunction<2> field_func(dof_handler, solution);
 
 int nx = ..., ny = ...;
@@ -399,7 +403,46 @@ int main(int argc, char* argv[]) {
 
 ---
 
-## 14. Common pitfalls
+## 14. Mixed FEM: DOF counting and block extraction (Stokes / linear elasticity)
+
+For `FESystem` with multiple components, use the modern API to count DOFs.
+
+```cpp
+#include <deal.II/dofs/dof_renumbering.h>   // DoFRenumbering
+#include <deal.II/lac/block_sparse_matrix.h>
+#include <deal.II/lac/block_vector.h>
+
+// --- Step 1: renumber DOFs by component ---
+DoFRenumbering::component_wise(dof_handler);
+
+// --- Step 2: count DOFs per FE component (returns a vector, do NOT pass output by ref) ---
+// Modern API (deal.II 9.x): returns std::vector<types::global_dof_index>
+const std::vector<types::global_dof_index> dofs_per_component =
+    DoFTools::count_dofs_per_fe_component(dof_handler);
+
+// --- Step 3: count DOFs per block (for block matrices) ---
+// block_component maps each FE component to a block index.
+// Example for Stokes (dim=2): velocity→block0, pressure→block1
+const unsigned int dim = 2;
+std::vector<unsigned int> block_component(dim + 1, 0); // velocity components → block 0
+block_component[dim] = 1;                              // pressure component  → block 1
+DoFRenumbering::component_wise(dof_handler, block_component);
+
+const std::vector<types::global_dof_index> dofs_per_block =
+    DoFTools::count_dofs_per_fe_block(dof_handler, block_component);
+
+const types::global_dof_index n_u = dofs_per_block[0];
+const types::global_dof_index n_p = dofs_per_block[1];
+```
+
+> **API change note:** The old functions `count_dofs_per_component`,
+> `count_dofs_per_fe_block(dh, vec, vec)` (3-argument form), and
+> `count_dofs_per_component` are **removed** in deal.II 9.x.
+> Always use the 1- or 2-argument forms that **return** the vector.
+
+---
+
+## 15. Common pitfalls
 
 | Problem | Fix |
 |---|---|
@@ -407,5 +450,8 @@ int main(int argc, char* argv[]) {
 | `FEFieldFunction::value_list` crashes | Check points are inside mesh bounds |
 | Stiffness matrix is singular | Boundary conditions not applied before solve |
 | Large residual after CG | Mesh too coarse; increase resolution |
-| Mixed space pressure DOFs | Use `DoFRenumbering::component_wise` + block extraction |
+| Mixed space: `count_dofs_per_component` not found | Use `DoFTools::count_dofs_per_fe_component(dof_handler)` (returns vector, see §14) |
+| Mixed space: `count_dofs_per_fe_block` compile error | Use 2-arg form: `DoFTools::count_dofs_per_fe_block(dof_handler, block_component)` |
+| `FEFieldFunction<dim, DoFHandler<dim>, Vec>` compile error | Use `Functions::FEFieldFunction<dim>` (1 template arg, see §10) |
+| `reduction_control.h: No such file` | Include `<deal.II/lac/solver_control.h>` instead (see §1) |
 | Time loop BC not updated | Call `bc_func.set_time(t)` before `interpolate_boundary_values` |

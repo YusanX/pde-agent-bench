@@ -718,3 +718,55 @@ def sample_magnitude_on_grid(u_sol, nx=50, ny=50, bbox=(0,1,0,1)):
 magnitude_grid = sample_magnitude_on_grid(u_sol)
 np.savez("output.npz", data=magnitude_grid)
 ```
+---
+
+## 12. Complex-domain meshes (L-shape, annulus, gear, circle, etc.)
+
+For non-rectangular domains use **`pygmsh`** + **`meshio`** + **`dolfinx.io.XDMFFile`** 
+
+```python
+import os
+import pygmsh
+import meshio
+from mpi4py import MPI
+from dolfinx.io import XDMFFile
+
+def build_mesh(char_length: float):
+    with pygmsh.occ.Geometry() as geom:
+        import gmsh
+        gmsh.option.setNumber("General.Verbosity", 0)
+        geom.characteristic_length_max = char_length
+
+        # --- describe your domain here, e.g.: ---
+        # polygon:  geom.add_polygon([[x,y,0], ...])
+        # disk:     geom.add_disk([cx,cy,0], r)
+        # annulus:  outer = geom.add_disk(...); inner = geom.add_disk(...)
+        #           geom.boolean_difference(outer, inner)
+        # union:    geom.boolean_union([shape1, shape2])
+
+        mesh_data = geom.generate_mesh()
+
+    # strip Z coordinate, keep only triangles
+    pts = mesh_data.points[:, :2]
+    out = meshio.Mesh(points=pts, cells={"triangle": mesh_data.cells_dict["triangle"]})
+    fname = f"_tmp_mesh_{os.getpid()}"
+    meshio.write(f"{fname}.xdmf", out)
+
+    with XDMFFile(MPI.COMM_WORLD, f"{fname}.xdmf", "r") as xf:
+        msh = xf.read_mesh(name="Grid")
+
+    for ext in [".xdmf", ".h5"]:
+        if os.path.exists(fname + ext):
+            os.remove(fname + ext)
+    return msh
+```
+
+After meshing, BCs work identically to rectangular meshes via `mesh.locate_entities_boundary` + `fem.locate_dofs_topological`.
+
+| Domain type | gmsh `char_length` ≈ | submesh fallback `res` |
+|---|---|---|
+| L-shape, T-junction | 1/resolution | 80–120 |
+| Circle, sector | 1/resolution | 100–150 |
+| Annulus, eccentric annulus | 1/resolution | — (use gmsh only) |
+| Gear, star, multi-hole | 1/resolution | — (use gmsh only) |
+
