@@ -434,11 +434,24 @@ Use dolfinx collision detection so exterior points become `np.nan` \
           values[i] = float(u_h.eval(points[i:i+1], links[:1]))
   ```"""
 
+    # 检测 3D
+    grid_cfg = output_cfg.get('grid', {})
+    is_3d = 'nz' in grid_cfg and len(grid_cfg.get('bbox', [])) == 6
+    if is_3d:
+        shape_desc = "`(nz, ny, nx)`"
+        grid_keys = '`nx`, `ny`, `nz`'
+        bbox_desc = '`[xmin, xmax, ymin, ymax, zmin, zmax]`'
+    else:
+        shape_desc = "`(ny, nx)`"
+        grid_keys = '`nx`, `ny`'
+        bbox_desc = '`[xmin, xmax, ymin, ymax]`'
+
     prompt += f"""
 **Domain:** {domain_desc}
 
 **Output Requirements:**
-- You must sample your solution onto the uniform grid from `case_spec["output"]["grid"]` and return it as a numpy array of shape `(ny, nx)`
+- You must sample your solution onto the uniform grid defined by `case_spec["output"]["grid"]` ({grid_keys} and `bbox` = {bbox_desc}) and return it as a numpy array of shape {shape_desc}.
+- The output shape MUST match exactly; mismatched shapes will fail evaluation (no interpolation or resampling is applied by the evaluator).
 - Output field: {output_field}{vector_field_note}{complex_domain_note}
 
 ---
@@ -448,6 +461,39 @@ Use dolfinx collision detection so exterior points become `np.nan` \
 
     # ── deal.II C++ 接口（与 Python 接口不同）──────────────────────────────
     if solver_library == "dealii":
+        if is_3d:
+            grid_comment = (
+                '    //      nx = case_spec["output"]["grid"]["nx"]  (int)\n'
+                '    //      ny = case_spec["output"]["grid"]["ny"]  (int)\n'
+                '    //      nz = case_spec["output"]["grid"]["nz"]  (int)\n'
+                '    //      bbox = case_spec["output"]["grid"]["bbox"]  ([xmin,xmax,ymin,ymax,zmin,zmax])'
+            )
+            bin_shape = "[nz, ny, nx]"
+            ordering = (
+                "- Row-major order: outer loop = z (plane k), middle = y (row j), inner = x (col i)\n"
+                "- `value[k*ny*nx + j*nx + i]` = u at point (x_lin[i], y_lin[j], z_lin[k])\n"
+                "- `x_lin = linspace(bbox[0], bbox[1], nx)`\n"
+                "- `y_lin = linspace(bbox[2], bbox[3], ny)`\n"
+                "- `z_lin = linspace(bbox[4], bbox[5], nz)`"
+            )
+            npz_shape = "(nz, ny, nx)"
+            meta_nz = '\n  "nz": <int>,'
+        else:
+            grid_comment = (
+                '    //      nx = case_spec["output"]["grid"]["nx"]  (int)\n'
+                '    //      ny = case_spec["output"]["grid"]["ny"]  (int)\n'
+                '    //      bbox = case_spec["output"]["grid"]["bbox"]  ([xmin,xmax,ymin,ymax])'
+            )
+            bin_shape = "[ny, nx]"
+            ordering = (
+                "- Row-major order: outer loop = y (row j), inner loop = x (col i)\n"
+                "- `value[j*nx + i]` = u at point (x_lin[i], y_lin[j])\n"
+                "- `x_lin = linspace(bbox[0], bbox[1], nx)`\n"
+                "- `y_lin = linspace(bbox[2], bbox[3], ny)`"
+            )
+            npz_shape = "(ny, nx)"
+            meta_nz = ''
+
         prompt += f"""
 Write a **C++** program using {lib_name} that:
 
@@ -460,11 +506,9 @@ int main(int argc, char* argv[]) {{
     // 1. Read case_spec.json with nlohmann/json
     // 2. Build mesh, FE space, assemble, solve
     // 3. Sample solution on uniform grid:
-    //      nx = case_spec["output"]["grid"]["nx"]  (int)
-    //      ny = case_spec["output"]["grid"]["ny"]  (int)
-    //      bbox = case_spec["output"]["grid"]["bbox"]  ([xmin,xmax,ymin,ymax])
+{grid_comment}
     // 4. Write output files:
-    //      argv[2]/solution_grid.bin  (float64, row-major [ny, nx])
+    //      argv[2]/solution_grid.bin  (float64, row-major {bin_shape})
     //      argv[2]/meta.json          (see below)
 }}
 ```
@@ -473,7 +517,7 @@ int main(int argc, char* argv[]) {{
 ```json
 {{
   "nx": <int>,
-  "ny": <int>,
+  "ny": <int>,{meta_nz}
   "wall_time_sec": <float>,
   "solver_info": {{
     "mesh_resolution": <int>,
@@ -486,13 +530,10 @@ int main(int argc, char* argv[]) {{
 ```
 
 **Grid ordering convention** (must match):
-- `solution_grid.bin` is a raw binary array of `ny × nx` float64 values
-- Row-major order: outer loop = y (row j), inner loop = x (col i)
-- `value[j*nx + i]` = u at point (x_lin[i], y_lin[j])
-- `x_lin = linspace(bbox[0], bbox[1], nx)`
-- `y_lin = linspace(bbox[2], bbox[3], ny)`
+- `solution_grid.bin` is a raw binary array of float64 values shaped {bin_shape}
+{ordering}
 
-**Alternatively**, you may write `solution.npz` (numpy format) with field `"u"` of shape (ny, nx).
+**Alternatively**, you may write `solution.npz` (numpy format) with field `"u"` of shape {npz_shape}.
 
 The evaluator provides:
 - `nlohmann/json` (header-only, `#include <nlohmann/json.hpp>`)
@@ -502,21 +543,41 @@ The evaluator provides:
         # ── Python 接口（dolfinx / firedrake）─────────────────────────────
         prompt += f"""
 Write a Python module using {lib_name} that exposes:
-"""
-        prompt += """
 
+**Key requirements (read before the code template):**
+1. You decide mesh resolution, element degree, solver type, etc. — but you MUST sample your final FEM solution onto the prescribed evaluation grid and return it with the exact required shape.
+2. Read the grid specification from `case_spec["output"]["grid"]`: it contains {grid_keys}, `bbox` = {bbox_desc}. Build the uniform grid from these, evaluate your FEM solution on every grid point, and return the result as a numpy array of shape {shape_desc}.
+3. Do NOT write any files (no solution.npz / meta.json). The evaluator handles file I/O.
+4. Report your solver choices in `solver_info` (see template below).
+"""
+        if is_3d:
+            prompt += """
 ```python
 def solve(case_spec: dict) -> dict:
     \"\"\"
     Return a dict with:
-    - "u": u_grid, 2-D numpy array of shape **(ny, nx)** sampled on the uniform
-         grid specified in case_spec["output"]["grid"]:
+    - "u": numpy array of shape **(nz, ny, nx)** sampled on the uniform 3-D grid:
+           nx   = case_spec["output"]["grid"]["nx"]
+           ny   = case_spec["output"]["grid"]["ny"]
+           nz   = case_spec["output"]["grid"]["nz"]
+           bbox = case_spec["output"]["grid"]["bbox"]  # [xmin, xmax, ymin, ymax, zmin, zmax]
+         Use your FEM solution's eval() to interpolate onto these nx*ny*nz points.
+         ⚠️  Output shape MUST be exactly (nz, ny, nx); wrong shape will fail evaluation.
+"""
+        else:
+            prompt += """
+```python
+def solve(case_spec: dict) -> dict:
+    \"\"\"
+    Return a dict with:
+    - "u": numpy array of shape **(ny, nx)** sampled on the uniform 2-D grid:
            nx   = case_spec["output"]["grid"]["nx"]
            ny   = case_spec["output"]["grid"]["ny"]
            bbox = case_spec["output"]["grid"]["bbox"]  # [xmin, xmax, ymin, ymax]
          Use your FEM solution's eval() to interpolate onto these nx*ny points.
          ⚠️  Output shape MUST be exactly (ny, nx); wrong shape will fail evaluation.
-    - "solver_info": dict with fields organized by PDE type:
+"""
+        prompt += """    - "solver_info": dict with fields organized by PDE type:
     
       ALWAYS REQUIRED (all PDEs):
         - mesh_resolution (int): spatial mesh resolution (e.g., 64, 128)
@@ -552,12 +613,6 @@ def solve(case_spec: dict) -> dict:
     - "u_initial": initial condition array, same shape as u (enables front propagation tracking)
     \"\"\"
 ```
-
-Notes:
-1. Do NOT write files (no solution.npz / meta.json).
-2. Evaluator will time your solve() call and write outputs.
-3. You decide mesh resolution, element degree, solver, etc., but must report them in solver_info.
-4. Optional fields help compute specialized metrics (e.g., CFL number, workrate, Newton convergence).
 """
 
     # 添加Agent参数暴露

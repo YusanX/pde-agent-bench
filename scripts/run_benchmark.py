@@ -56,6 +56,7 @@ from pdebench.core.prompt_builder import generate_prompt
 from pdebench.core.llm_client import call_llm, LLMClient
 from pdebench.core.feedback_prompt import create_feedback_prompt  # 实验 2.1: 多轮迭代
 from pdebench.metrics.specialized import get_specialized_metrics_computer
+from pdebench.metrics.universal import compute_universal_metrics, UNIVERSAL_METRIC_KEYS
 from pdebench.analysis import GateAnalyzer, ErrorClassifier  # 实验 4.1, 4.5
 from pdebench.agents import AgentRegistry, get_agent  # 实验 1.2: Code Agent
 
@@ -553,7 +554,13 @@ def run_single_case(
     if 'response' in locals() and hasattr(response, 'usage') and response.usage:
         result['llm_usage'] = response.usage
     
-    # 计算各math_type子榜指标
+    # 通用指标 (RMSE, MAE, R², fRMSE) — 仅对 PASS case 计算
+    if status == 'PASS':
+        universal = compute_universal_metrics(exec_result['agent_output'], oracle_info)
+        if universal:
+            result['universal_metrics'] = universal
+    
+    # 计算各math_type子榜指标（保留用于细粒度分析）
     math_types = case.get('pde_classification', {}).get('math_type', [])
     math_type_metrics = {}
     for mt in math_types:
@@ -1339,7 +1346,13 @@ def run_single_case_multi_attempt(
     if total_llm_usage:
         result['llm_usage'] = total_llm_usage
     
-    # 计算各 math_type 子榜指标（仅当最佳尝试执行成功时）
+    # 通用指标 (RMSE, MAE, R², fRMSE) — 仅对 PASS case 计算
+    if best_attempt.get('status') == 'PASS' and exec_result.get('agent_output'):
+        universal = compute_universal_metrics(exec_result['agent_output'], oracle_info)
+        if universal:
+            result['universal_metrics'] = universal
+    
+    # 计算各 math_type 子榜指标（保留用于细粒度分析）
     if best_attempt.get('success') and exec_result.get('agent_output'):
         math_types = case.get('pde_classification', {}).get('math_type', [])
         math_type_metrics = {}
@@ -1533,6 +1546,18 @@ def compute_summary(agent_name: str, results: List[Dict]) -> Dict:
     errors = [r['error'] for r in results if r.get('status') in ['PASS', 'FAIL'] and r.get('error') is not None]
     times = [r['time'] for r in results if r.get('status') in ['PASS', 'FAIL'] and r.get('time') is not None]
     
+    # 全局通用指标聚合
+    global_um_accum: Dict[str, List[float]] = {k: [] for k in UNIVERSAL_METRIC_KEYS}
+    for r in results:
+        um = r.get('universal_metrics', {})
+        for k in UNIVERSAL_METRIC_KEYS:
+            if k in um and isinstance(um[k], (int, float)) and np.isfinite(um[k]):
+                global_um_accum[k].append(float(um[k]))
+    avg_universal_metrics = {}
+    for k, vals in global_um_accum.items():
+        if vals:
+            avg_universal_metrics[k] = float(np.mean(vals))
+    
     # equation_type 统计
     equation_type_summary: Dict[str, Dict[str, Any]] = {}
     for r in results:
@@ -1543,7 +1568,8 @@ def compute_summary(agent_name: str, results: List[Dict]) -> Dict:
                 'passed': 0,
                 'failed': 0,
                 'errors': [],
-                'times': []
+                'times': [],
+                '_um_accum': {k: [] for k in UNIVERSAL_METRIC_KEYS},
             }
         equation_type_summary[eq_type]['cases'] += 1
         if r.get('status') == 'PASS':
@@ -1556,15 +1582,29 @@ def compute_summary(agent_name: str, results: List[Dict]) -> Dict:
             equation_type_summary[eq_type]['errors'].append(r['error'])
         if r.get('time') is not None:
             equation_type_summary[eq_type]['times'].append(r['time'])
+        
+        # 收集通用指标
+        um = r.get('universal_metrics', {})
+        for k in UNIVERSAL_METRIC_KEYS:
+            if k in um and isinstance(um[k], (int, float)) and np.isfinite(um[k]):
+                equation_type_summary[eq_type]['_um_accum'][k].append(float(um[k]))
     
     # 计算每个equation_type的统计数据
     for eq_type, info in equation_type_summary.items():
         info['pass_rate'] = info['passed'] / info['cases'] if info['cases'] > 0 else 0.0
         info['avg_error'] = float(np.mean(info['errors'])) if info['errors'] else None
         info['avg_time'] = float(np.mean(info['times'])) if info['times'] else None
+        # 通用指标平均
+        um_avg = {}
+        for k, vals in info['_um_accum'].items():
+            if vals:
+                um_avg[k] = float(np.mean(vals))
+        if um_avg:
+            info['avg_universal_metrics'] = um_avg
         # 删除临时列表
         info.pop('errors', None)
         info.pop('times', None)
+        info.pop('_um_accum', None)
     
     # math_type 子榜
     math_type_summary: Dict[str, Dict[str, Any]] = {}
@@ -1723,13 +1763,23 @@ def compute_summary(agent_name: str, results: List[Dict]) -> Dict:
         'pass_rate': passed / total if total > 0 else 0,
         'avg_error': float(np.mean(errors)) if errors else None,
         'avg_time': float(np.mean(times)) if times else None,
-        'equation_type_summary': equation_type_summary,  # 按方程类型统计
+        'avg_universal_metrics': avg_universal_metrics,   # 全局通用指标
+        'equation_type_summary': equation_type_summary,   # 按方程类型统计
         'math_type_summary': math_type_summary,
         'gate_statistics': gate_statistics,  # 实验 4.1
         'cost_analysis': cost_analysis,      # 实验 4.6
         'multi_attempt_stats': multi_attempt_stats,  # 实验 2.1
         'results': results
     }
+
+
+def _format_metric(name: str, value: float) -> str:
+    """Format a universal metric value for display."""
+    if name == 'r2':
+        return f"{value:.4f}"
+    if 'frmse' in name:
+        return f"{value:.4e}"
+    return f"{value:.4e}"
 
 
 def print_summary(summary: Dict):
@@ -1740,9 +1790,19 @@ def print_summary(summary: Dict):
     print(f"Total Cases: {summary['total_cases']}")
     print(f"Passed: {summary['passed_cases']} ({summary['pass_rate']:.1%})")
     if summary['avg_error'] is not None:
-        print(f"Avg Error: {summary['avg_error']:.2e}")
+        print(f"Avg Rel-L2: {summary['avg_error']:.2e}")
     if summary['avg_time'] is not None:
         print(f"Avg Time: {summary['avg_time']:.3f}s")
+    
+    # 全局通用指标
+    um = summary.get('avg_universal_metrics', {})
+    if um:
+        print(f"\n{'─'*80}")
+        print(f"📏 Universal Metrics (global avg)")
+        print(f"{'─'*80}")
+        for k in UNIVERSAL_METRIC_KEYS:
+            if k in um:
+                print(f"  {k:>12s}: {_format_metric(k, um[k])}")
     
     # Equation Type 统计（按方程类型）
     if 'equation_type_summary' in summary and summary['equation_type_summary']:
@@ -1756,9 +1816,14 @@ def print_summary(summary: Dict):
             print(f"    Failed:     {stats['failed']} cases")
             print(f"    Pass Rate:  {stats['pass_rate']:.1%}")
             if stats.get('avg_error') is not None:
-                print(f"    Avg Error:  {stats['avg_error']:.2e}")
+                print(f"    Avg Rel-L2: {stats['avg_error']:.2e}")
             if stats.get('avg_time') is not None:
                 print(f"    Avg Time:   {stats['avg_time']:.3f}s")
+            eq_um = stats.get('avg_universal_metrics', {})
+            if eq_um:
+                for k in UNIVERSAL_METRIC_KEYS:
+                    if k in eq_um:
+                        print(f"    {k:>12s}: {_format_metric(k, eq_um[k])}")
     
     # Math Type 子榜统计
     if 'math_type_summary' in summary and summary['math_type_summary']:

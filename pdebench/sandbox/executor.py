@@ -324,69 +324,67 @@ def main():
     # case_spec 是 agent 视图，output 直接在顶层
     grid = case_spec["output"]["grid"]
     nx, ny = grid["nx"], grid["ny"]
+    nz = grid.get("nz")
     bbox = grid["bbox"]
+    is_3d = nz is not None and len(bbox) == 6
 
+    if is_3d:
+        expected_shape = (nz, ny, nx)
+    else:
+        expected_shape = (ny, nx)
+
+    # 1-D flat array: try to reshape to expected grid shape
     if u_grid.ndim == 1:
-        # 1-D 时尝试按 (ny, nx) reshape
-        if u_grid.size == ny * nx:
-            u_grid = u_grid.reshape((ny, nx))
+        total = 1
+        for d in expected_shape:
+            total *= d
+        if u_grid.size == total:
+            u_grid = u_grid.reshape(expected_shape)
         else:
-            side = int(round(u_grid.size ** 0.5))
-            if side * side == u_grid.size:
-                u_grid = u_grid.reshape((side, side))
-            else:
-                raise ValueError(f"Cannot reshape 1-D array of size {{u_grid.size}} into a 2-D grid")
-    if u_grid.ndim != 2:
-        raise ValueError(f"u_grid must be 2-D, got shape {{u_grid.shape}}")
+            raise ValueError(
+                f"Cannot reshape 1-D array of size {{u_grid.size}} "
+                f"into expected shape {{expected_shape}}"
+            )
 
-    # 约定：u_grid 形状为 (ny, nx)，即 u_grid[row_y, col_x]
-    # 若 agent 返回的尺寸与 oracle 不同，则重采样到 (ny, nx)
-    # NaN（域外点）用 fill_value=np.nan 保留，不向内部晕染
-    if u_grid.shape != (ny, nx):
-        from scipy.interpolate import RegularGridInterpolator
-        agent_ny, agent_nx = u_grid.shape          # 行=y，列=x
-        agent_y = np.linspace(bbox[2], bbox[3], agent_ny)
-        agent_x = np.linspace(bbox[0], bbox[1], agent_nx)
-        interp = RegularGridInterpolator(
-            (agent_y, agent_x), u_grid,
-            method="linear", bounds_error=False, fill_value=np.nan,
+    # Strict shape check: no interpolation / resampling
+    if u_grid.shape != expected_shape:
+        raise ValueError(
+            f"Output shape mismatch: got {{u_grid.shape}}, "
+            f"expected {{expected_shape}}. "
+            f"Your solve() must return an array sampled on the prescribed "
+            f"evaluation grid (nx={{nx}}, ny={{ny}}"
+            + (f", nz={{nz}}" if is_3d else "")
+            + ")."
         )
-        ref_y = np.linspace(bbox[2], bbox[3], ny)
-        ref_x = np.linspace(bbox[0], bbox[1], nx)
-        YY, XX = np.meshgrid(ref_y, ref_x, indexing="ij")  # shape (ny, nx)
-        u_grid = interp(np.stack([YY.ravel(), XX.ravel()], axis=-1)).reshape(ny, nx)
 
-    x = np.linspace(bbox[0], bbox[1], nx)
-    y = np.linspace(bbox[2], bbox[3], ny)
-    np.savez(f"{{args.outdir}}/solution.npz", x=x, y=y, u=u_grid)
+    # Save solution
+    if is_3d:
+        x = np.linspace(bbox[0], bbox[1], nx)
+        y = np.linspace(bbox[2], bbox[3], ny)
+        z = np.linspace(bbox[4], bbox[5], nz)
+        np.savez(f"{{args.outdir}}/solution.npz", x=x, y=y, z=z, u=u_grid)
+    else:
+        x = np.linspace(bbox[0], bbox[1], nx)
+        y = np.linspace(bbox[2], bbox[3], ny)
+        np.savez(f"{{args.outdir}}/solution.npz", x=x, y=y, u=u_grid)
 
-    # Save u.npy for specialized metrics (e.g., front propagation speed)
     np.save(f"{{args.outdir}}/u.npy", u_grid)
 
-    # Save u_initial.npy if provided (for time-dependent problems)
+    # Save u_initial if provided (for time-dependent problems)
     u_initial = result.get("u_initial")
     if u_initial is not None:
         u_initial = np.array(u_initial, dtype=float)
         if u_initial.ndim == 1:
-            if u_initial.size == ny * nx:
-                u_initial = u_initial.reshape((ny, nx))
-            else:
-                side = int(round(u_initial.size ** 0.5))
-                if side * side == u_initial.size:
-                    u_initial = u_initial.reshape((side, side))
-        if u_initial.ndim == 2 and u_initial.shape != (ny, nx):
-            from scipy.interpolate import RegularGridInterpolator
-            init_ny, init_nx = u_initial.shape
-            init_y = np.linspace(bbox[2], bbox[3], init_ny)
-            init_x = np.linspace(bbox[0], bbox[1], init_nx)
-            interp_init = RegularGridInterpolator(
-                (init_y, init_x), u_initial,
-                method="linear", bounds_error=False, fill_value=np.nan,
+            total = 1
+            for d in expected_shape:
+                total *= d
+            if u_initial.size == total:
+                u_initial = u_initial.reshape(expected_shape)
+        if u_initial.shape != expected_shape:
+            raise ValueError(
+                f"u_initial shape mismatch: got {{u_initial.shape}}, "
+                f"expected {{expected_shape}}"
             )
-            ref_y = np.linspace(bbox[2], bbox[3], ny)
-            ref_x = np.linspace(bbox[0], bbox[1], nx)
-            YY, XX = np.meshgrid(ref_y, ref_x, indexing="ij")
-            u_initial = interp_init(np.stack([YY.ravel(), XX.ravel()], axis=-1)).reshape(ny, nx)
         np.save(f"{{args.outdir}}/u_initial.npy", u_initial)
 
     meta = {{
