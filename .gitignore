@@ -19,6 +19,7 @@ artifacts_bench/
 !pdebench/**/*.json
 !artifacts_bench/meta.json
 !benchmark_report.json
+!data/**/*.json
 
 # IDE
 .vscode/
