@@ -88,7 +88,7 @@
       "@id": "benchmark_v2.jsonl",
       "name": "benchmark_v2.jsonl",
       "description": "JSON-Lines file in which each line is a self-contained PDE benchmark case.",
-      "contentUrl": "benchmark_v2.jsonl",
+      "contentUrl": "https://raw.githubusercontent.com/YusanX/pde-agent-bench/feat/new_lib/data/benchmark_v2.jsonl",
       "encodingFormat": "application/jsonlines",
       "contentSize": "886601 B",
       "sha256": "0ce658237dbcb44aaeb4e6880beec22b1d3f14bea80617dff4a1c8f45014b177",
