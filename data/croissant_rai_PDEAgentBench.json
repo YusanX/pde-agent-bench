@@ -48,23 +48,25 @@
     "prov": "http://www.w3.org/ns/prov#"
   },
   "@type": "sc:Dataset",
-  "name": "PDEBench-v2",
-  "alternateName": "PDE-Agent-Bench v2",
-  "description": "PDEBench is a benchmark for evaluating the end-to-end ability of large language models and AI agents to generate solver code for partial differential equations (PDEs). Given a natural-language description of a PDE problem, an agent must produce a complete finite-element solver (e.g. for FEniCSx/dolfinx, Firedrake, or deal.II). Version 2 (benchmark_v2.jsonl) contains 645 cases spanning 11 equation families (Poisson, heat, wave, Burgers, convection-diffusion, reaction-diffusion, Helmholtz, biharmonic, linear elasticity, Stokes, Navier-Stokes) and 7 mathematical types (elliptic, parabolic, hyperbolic, nonlinear, reaction-diffusion, incompressible flow, mixed type). Each record specifies an oracle solver configuration, an evaluation strategy, the agent-tunable knobs, and the supported FEM libraries.",
+  "name": "PDEAgent-Bench",
+  "alternateName": "PDEAgent-Bench",
+  "description": "PDEAgent-Bench is a benchmark for evaluating the end-to-end ability of large language models and AI agents to generate solver code for partial differential equations (PDEs). Given a natural-language description of a PDE problem, an agent must produce a complete finite-element solver (e.g. for FEniCSx/dolfinx, Firedrake, or deal.II). The dataset (benchmark_v2.jsonl) contains 645 cases spanning 11 equation families (Poisson, heat, wave, Burgers, convection-diffusion, reaction-diffusion, Helmholtz, biharmonic, linear elasticity, Stokes, Navier-Stokes) and 7 mathematical types (elliptic, parabolic, hyperbolic, nonlinear, reaction-diffusion, incompressible flow, mixed type). Each record specifies an oracle solver configuration, an evaluation strategy, the agent-tunable knobs, and the supported FEM libraries.",
   "conformsTo": "http://mlcommons.org/croissant/1.0",
   "license": "https://creativecommons.org/licenses/by/4.0/",
-  "url": "https://github.com/anonymous/pde-agent-bench",
+  "url": "https://github.com/YusanX/pde-agent-bench",
   "version": "2.0.0",
   "datePublished": "2026-05-04",
   "keywords": [
+    "PDE-to-solver code generation",
+    "code agents",
+    "numerical PDEs",
+    "benchmark",
+    "multi-metric evaluation",
+    "scientific computing",
     "partial differential equations",
     "PDE",
     "finite element method",
     "FEM",
-    "code generation",
-    "LLM benchmark",
-    "AI agent",
-    "scientific computing",
     "FEniCSx",
     "dolfinx",
     "Firedrake",
@@ -72,13 +74,13 @@
   ],
   "creator": {
     "@type": "Organization",
-    "name": "PDEBench Authors"
+    "name": "PDEAgent-Bench Authors"
   },
   "publisher": {
     "@type": "Organization",
-    "name": "PDEBench Authors"
+    "name": "PDEAgent-Bench Authors"
   },
-  "citeAs": "@misc{pdebench2026, title={PDEBench: AI-Driven PDE Solver Code Generation Benchmark}, author={PDEBench Authors}, year={2026}}",
+  "citeAs": "@misc{pdeagentbench2026, title={PDEAgent-Bench: A Multi-Metric Benchmark for PDE-to-Solver Code Generation}, author={PDEAgent-Bench Authors}, year={2026}}",
   "isLiveDataset": false,
   "distribution": [
     {
@@ -89,8 +91,8 @@
       "contentUrl": "benchmark_v2.jsonl",
       "encodingFormat": "application/jsonlines",
       "contentSize": "886601 B",
-      "sha256": "51f3dcb4c3f91495142da02f29a1f6fa612165171e361573f1312028a8963e81",
-      "md5": "6f3522bc29d78136f71da356551bc914"
+      "sha256": "0ce658237dbcb44aaeb4e6880beec22b1d3f14bea80617dff4a1c8f45014b177",
+      "md5": "e6f318a06916d5fb0e9c3df0a7a42b38"
     }
   ],
   "recordSet": [
@@ -255,6 +257,13 @@
       },
       "prov:label": "Oracle Execution and Quality Filtering",
       "sc:description": "Every generated case was validated by executing the oracle FEM solver (FEniCSx/dolfinx, Firedrake, or deal.II) and verifying numerical convergence against the reference solution. Cases failing solver execution, convergence checks, or schema validation were discarded before the final dataset was assembled."
+    }
+  ],
+  "prov:wasDerivedFrom": [
+    {
+      "@id": "N/A",
+      "prov:label": "No external source dataset",
+      "sc:license": "CC-BY-4.0"
     }
   ]
 }
