@@ -29,11 +29,17 @@ class MixedTypeMetricsComputer(SpecializedMetricsComputer):
         metrics = {}
         
         try:
-            # Read Péclet number (prefer explicit field, fallback to epsilon/beta)
-            pde_config = self.config.get('oracle_config', {}).get('pde', {})
+            # Read Péclet number (prefer explicit field, fallback to epsilon/beta).
+            # Support two config layouts:
+            #   (a) full benchmark case:  config['oracle_config']['pde']['pde_params']
+            #   (b) case_spec.json:       config['pde']['pde_params']  (no oracle_config wrapper)
+            pde_config = (
+                self.config.get('oracle_config', {}).get('pde', {})
+                or self.config.get('pde', {})
+            )
             peclet = pde_config.get('peclet', None)
             if peclet is None:
-                params = pde_config.get('pde_params', {})
+                params = pde_config.get('pde_params', {}) or {}
                 epsilon = params.get('epsilon', None)
                 beta = params.get('beta', None)
                 if isinstance(epsilon, (int, float)) and epsilon != 0 and beta is not None:
@@ -98,6 +104,19 @@ class MixedTypeMetricsComputer(SpecializedMetricsComputer):
             if 'solver_info' in meta:
                 si = meta['solver_info']
                 if isinstance(si, dict):
+                    # Mesh / discretisation info
+                    if 'mesh_resolution' in si:
+                        solver_info['mesh_resolution'] = int(si['mesh_resolution'])
+                    if 'element_degree' in si:
+                        solver_info['element_degree'] = int(si['element_degree'])
+                    # Linear solver iterations
+                    if 'iterations' in si:
+                        iterations = si['iterations']
+                        if isinstance(iterations, (int, float)):
+                            solver_info['linear_iterations'] = int(iterations)
+                        elif isinstance(iterations, list):
+                            solver_info['linear_iterations_mean'] = float(np.mean(iterations))
+                            solver_info['linear_iterations_max'] = int(np.max(iterations))
                     # Stabilization method (for mixed-type convection-diffusion)
                     if 'stabilization' in si:
                         solver_info['stabilization_method'] = si['stabilization']

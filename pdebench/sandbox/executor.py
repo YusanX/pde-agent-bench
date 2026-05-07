@@ -223,27 +223,41 @@ def _build_agent_case_spec(case: Dict[str, Any]) -> Dict[str, Any]:
     """构造传给 agent solve() 的精简 spec，屏蔽 oracle 内部参数。
 
     只暴露 agent 需要的信息：
-      - pde       方程参数（类型、系数、源项、制造解等）
+      - pde       方程参数（类型、系数、源项等，已过滤解析解字段）
       - domain    几何域描述（供 agent 建网格）
       - bc        边界条件
       - output    输出网格规格（bbox / nx / ny）
-      - agent_knobs  允许 agent 自主调节的参数列表
+      - agent_knobs  允许 agent 自主调节的参数列表（已过滤解析解相关 knob）
       - id / pde_classification  元信息
 
     不暴露：
       - oracle_config.mesh        oracle 用的网格精度
       - oracle_config.fem         oracle 用的有限元阶次
       - oracle_config.oracle_solver  oracle 求解器参数
+      - pde.manufactured_solution / manufactured_u / exact_solution  解析解
     """
     oc = case.get("oracle_config", {})
+
+    # 过滤 pde 字段中的解析解，只保留 agent 构造求解器所需的信息
+    _PDE_HIDDEN_KEYS = {"manufactured_solution", "manufactured_u", "exact_solution"}
+    pde_raw = oc.get("pde", {})
+    pde_agent = {k: v for k, v in pde_raw.items() if k not in _PDE_HIDDEN_KEYS}
+
+    # agent_knobs 中同样过滤掉 manufactured_solution 相关 knob
+    _KNOB_HIDDEN_NAMES = {"manufactured_solution", "manufactured_u", "exact_solution"}
+    agent_knobs = [
+        k for k in case.get("agent_knobs", [])
+        if k.get("name") not in _KNOB_HIDDEN_NAMES
+    ]
+
     return {
         "id":                 case.get("id", ""),
         "pde_classification": case.get("pde_classification", {}),
-        "pde":                oc.get("pde", {}),
+        "pde":                pde_agent,
         "domain":             oc.get("domain", {"type": "unit_square"}),
         "bc":                 oc.get("bc", {}),
         "output":             oc.get("output", {}),
-        "agent_knobs":        case.get("agent_knobs", []),
+        "agent_knobs":        agent_knobs,
         "evaluation_config":  case.get("evaluation_config", {}),
     }
 

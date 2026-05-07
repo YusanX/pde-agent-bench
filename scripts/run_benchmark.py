@@ -1945,7 +1945,7 @@ def main():
     parser.add_argument(
         '--version',
         choices=['v1', 'v2'],
-        default=None,
+        default='v2',
         help=(
             'Dataset version: "v1" loads data/benchmark_v1.jsonl and forces dolfinx backend; '
             '"v2" loads data/benchmark_v2.jsonl with full multi-backend support.'

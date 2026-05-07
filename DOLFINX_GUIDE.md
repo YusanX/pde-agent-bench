@@ -551,7 +551,7 @@ w_h = problem.solve()
 
 **Error 4 — `ufl.grad()` on a pure Python/UFL constant fails with "Cannot determine geometric dimension"**
 
-This happens when the manufactured pressure is `p=0` and you write `ufl.grad(ufl.as_ufl(0.0))`:
+This happens when the pressure field is zero and you write `ufl.grad(ufl.as_ufl(0.0))`:
 
 ```python
 # ❌ WRONG: ufl.as_ufl(0.0) has no mesh context → ValueError in ufl.grad
@@ -604,7 +604,7 @@ V = fem.functionspace(msh, ("Lagrange", 2, (gdim,)))   # P2 vector — recommend
 > (including interior nodes), effectively prescribing the solution everywhere and bypassing
 > the FEM solve. Always use the **topological** method shown below.
 
-**Case A — Full Dirichlet BC on all boundaries (e.g., manufactured solution)**
+**Case A — Full Dirichlet BC on all boundaries (e.g., prescribed nonzero displacement)**
 
 ```python
 fdim = msh.topology.dim - 1
@@ -623,16 +623,16 @@ u_bc = fem.Function(V)
 # Option A: constant zero displacement
 u_bc.x.array[:] = 0.0
 
-# Option B: non-uniform BC from a known exact/analytic expression
+# Option B: non-uniform BC from a given boundary expression
 import ufl
 x_coord = ufl.SpatialCoordinate(msh)
-# Example: u_exact = (sin(pi*x)*sin(pi*y), sin(pi*x)*cos(pi*y))
-u_exact_expr = ufl.as_vector([
+# Example: use whatever expression appears in case_spec["bc"]["dirichlet"]["value"]
+bc_expr = ufl.as_vector([
     ufl.sin(ufl.pi * x_coord[0]) * ufl.sin(ufl.pi * x_coord[1]),
     ufl.sin(ufl.pi * x_coord[0]) * ufl.cos(ufl.pi * x_coord[1]),
 ])
 u_bc.interpolate(
-    fem.Expression(u_exact_expr, V.element.interpolation_points())
+    fem.Expression(bc_expr, V.element.interpolation_points())
 )
 
 bc = fem.dirichletbc(u_bc, boundary_dofs)

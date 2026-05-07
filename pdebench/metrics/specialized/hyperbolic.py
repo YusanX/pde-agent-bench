@@ -29,47 +29,74 @@ class HyperbolicMetricsComputer(SpecializedMetricsComputer):
         metrics = {}
         
         try:
-            # Basic parameters
-            resolution = result.get('test_params', {}).get('resolution', 0)
-            dt = result.get('test_params', {}).get('dt', 0.01)
-            
-            h = 1.0 / resolution
-            
+            # Read parameters from meta.json (primary source, same pattern as other computers)
+            resolution = 0
+            degree = 1
+            dt = None
+            n_steps = None
+            iterations = None
+
+            meta_file = self.agent_output_dir / 'meta.json'
+            if meta_file.exists():
+                with open(meta_file) as f:
+                    meta = json.load(f)
+                si = meta.get('solver_info', {})
+                resolution = si.get('mesh_resolution', 0)
+                degree = si.get('element_degree', 1)
+                dt = si.get('dt')
+                n_steps = si.get('n_steps')
+                iterations = si.get('iterations')
+
+            # Fallback to test_params for backward compatibility
+            if resolution == 0:
+                resolution = result.get('test_params', {}).get('resolution', 0)
+            if dt is None:
+                dt = result.get('test_params', {}).get('dt', 0.01)
+
+            if resolution > 0:
+                metrics['mesh_resolution'] = int(resolution)
+            metrics['element_degree'] = int(degree)
+
+            if dt is not None:
+                metrics['dt'] = float(dt)
+            if n_steps is not None:
+                metrics['n_steps'] = int(n_steps)
+            if iterations is not None:
+                metrics['linear_iterations'] = int(iterations) if isinstance(iterations, (int, float)) \
+                    else int(np.sum(iterations))
+
             # CFL number (for advection: CFL = |a| * dt / h)
-            if 'velocity' in self.config['oracle_config']['pde']:
-                vel = self.config['oracle_config']['pde']['velocity']
-                if isinstance(vel, dict):
-                    vx = vel.get('vx', 0.0)
-                    vy = vel.get('vy', 0.0)
-                    velocity_mag = np.sqrt(vx**2 + vy**2)
-                else:
-                    velocity_mag = float(vel)
-                
-                cfl = velocity_mag * dt / h
-                metrics['cfl_number'] = float(cfl)
-                if cfl > 1.0:
-                    metrics['cfl_warning'] = f"CFL={cfl:.2f} > 1.0 (explicit unstable)"
-            
-            # Total variation and shock detection
+            if resolution > 0 and dt is not None:
+                h = 1.0 / resolution
+                pde_cfg = self.config.get('oracle_config', {}).get('pde', {})
+                if 'velocity' in pde_cfg:
+                    vel = pde_cfg['velocity']
+                    if isinstance(vel, dict):
+                        vx = vel.get('vx', 0.0)
+                        vy = vel.get('vy', 0.0)
+                        velocity_mag = float(np.sqrt(vx**2 + vy**2))
+                    else:
+                        velocity_mag = float(vel)
+                    cfl = velocity_mag * float(dt) / h
+                    metrics['cfl_number'] = cfl
+                    if cfl > 1.0:
+                        metrics['cfl_warning'] = f"CFL={cfl:.2f} > 1.0 (explicit unstable)"
+
+            # Total variation from u_history (if available)
             u_history_file = self.agent_output_dir / 'u_history.npy'
             if u_history_file.exists():
                 u_history = np.load(u_history_file)
-                
-                # Total Variation at final time
-                u_final = u_history[-1]
-                tv = self._compute_total_variation(u_final)
+                tv = self._compute_total_variation(u_history[-1])
                 metrics['total_variation'] = float(tv)
-                
-                
-            
-            # Solver information
+
+            # Solver information (time_integrator, shock_limiter)
             solver_info = self._read_solver_info()
             if solver_info:
                 metrics.update(solver_info)
-        
+
         except Exception as e:
             metrics['error'] = f"Failed to compute hyperbolic metrics: {str(e)}"
-        
+
         return metrics
     
     def _compute_total_variation(self, u: np.ndarray) -> float:

@@ -187,6 +187,120 @@ def format_domain(domain_cfg: Dict) -> str:
     return f"{domain_type} domain (see oracle_config.domain for geometry parameters)"
 
 
+def generate_nl_description(case: Dict) -> str:
+    """Generate a concise natural-language problem description for the prompt header.
+
+    Format (one clause per line):
+        Solve <the [steady-state] PDE name>
+        on <domain description>
+        with <coefficient description>
+        and <boundary condition description>.
+    """
+    pde_config = case['oracle_config']['pde']
+    pde_type = pde_config.get('type', 'poisson')
+    domain_cfg = case['oracle_config'].get('domain', {'type': 'unit_square'})
+    bc_cfg = case['oracle_config'].get('bc', {})
+
+    # ── PDE name ──────────────────────────────────────────────────────────────
+    has_time = 'time' in pde_config
+    _pde_base = {
+        'poisson':              'Poisson equation',
+        'heat':                 'heat equation',
+        'convection_diffusion': 'convection-diffusion equation',
+        'stokes':               'Stokes flow problem',
+        'navier_stokes':        'Navier-Stokes flow problem',
+        'helmholtz':            'Helmholtz equation',
+        'biharmonic':           'biharmonic equation',
+        'linear_elasticity':    'linear elasticity problem',
+        'reaction_diffusion':   'reaction-diffusion equation',
+        'wave':                 'wave equation',
+        'burgers':              "Burgers' equation",
+    }
+    pde_base = _pde_base.get(pde_type, f'{pde_type.replace("_", "-")} equation')
+    _steady_types = {
+        'poisson', 'stokes', 'navier_stokes', 'helmholtz', 'biharmonic', 'linear_elasticity',
+    }
+    if pde_type in _steady_types:
+        full_pde = f'the steady-state {pde_base}'
+    elif has_time:
+        full_pde = f'the transient {pde_base}'
+    else:
+        full_pde = f'the {pde_base}'
+
+    # ── Domain ────────────────────────────────────────────────────────────────
+    domain_type = domain_cfg.get('type', 'unit_square')
+    _domain_nl = {
+        'unit_square':       'a unit square domain',
+        'unit_cube':         'a 3D unit cube domain',
+        'l_shape':           'an L-shaped domain',
+        'circle':            'a circular domain',
+        'annulus':           'an annular (ring) domain',
+        'square_with_hole':  'a square domain with a hole',
+        'multi_hole':        'a square domain with multiple holes',
+        't_junction':        'a T-junction domain',
+        'sector':            'a circular sector domain',
+        'star':              'a star-shaped domain',
+        'star_shape':        'a star-shaped domain',
+        'gear':              'a gear-shaped domain',
+        'eccentric_annulus': 'an eccentric annular domain',
+        'dumbbell':          'a dumbbell-shaped domain',
+        'periodic_square':   'a periodic square domain',
+    }
+    domain_nl = _domain_nl.get(domain_type, f'a {domain_type.replace("_", "-")} domain')
+
+    # ── Coefficients ──────────────────────────────────────────────────────────
+    coefficients = pde_config.get('coefficients', {})
+    coeff_desc = ''
+    if coefficients:
+        has_variable = any(
+            (isinstance(v, dict) and v.get('type', 'constant') != 'constant')
+            for v in coefficients.values()
+        )
+        if pde_type == 'linear_elasticity':
+            coeff_desc = ('heterogeneous material properties'
+                          if has_variable else 'homogeneous material properties')
+        elif pde_type in ('stokes', 'navier_stokes'):
+            coeff_desc = 'variable viscosity' if has_variable else 'constant viscosity'
+        else:
+            coeff_desc = ('heterogeneous conductivity'
+                          if has_variable else 'homogeneous conductivity')
+
+    # Helmholtz: always mention wave number as the key parameter
+    if pde_type == 'helmholtz':
+        k = pde_config.get('pde_params', {}).get('k',
+              pde_config.get('pde_params', {}).get('wave_number', None))
+        coeff_desc = f'wave number k={k}' if k is not None else 'prescribed wave number'
+
+    # Convection-diffusion: mention Péclet regime
+    if pde_type == 'convection_diffusion':
+        params = pde_config.get('pde_params', {})
+        eps = params.get('epsilon', 0.01)
+        beta = params.get('beta', [1.0, 1.0])
+        beta_norm = (beta[0]**2 + beta[1]**2)**0.5 if isinstance(beta, list) else float(beta)
+        pe = beta_norm / eps if eps > 0 else float('inf')
+        coeff_desc = f'high-Péclet convection (Pe≈{pe:.0f})' if pe > 10 else f'low-Péclet diffusion (Pe≈{pe:.1f})'
+
+    # ── Boundary conditions ───────────────────────────────────────────────────
+    has_dirichlet = bool(bc_cfg.get('dirichlet', {}))
+    has_neumann = bool(bc_cfg.get('neumann', {}))
+    if has_dirichlet and has_neumann:
+        bc_desc = 'mixed (Dirichlet + Neumann) boundary conditions'
+    elif has_neumann:
+        bc_desc = 'Neumann boundary conditions'
+    else:
+        bc_desc = 'Dirichlet boundary conditions'
+
+    # ── Assemble ──────────────────────────────────────────────────────────────
+    lines = [f'Solve {full_pde}', f'on {domain_nl}']
+    if coeff_desc:
+        lines.append(f'with {coeff_desc}')
+        lines.append(f'and {bc_desc}.')
+    else:
+        lines.append(f'with {bc_desc}.')
+
+    return '\n'.join(lines)
+
+
 def format_coefficient(coeff: Dict) -> str:
     """格式化系数配置"""
     coeff_type = coeff.get('type', 'constant')
@@ -225,8 +339,13 @@ def generate_prompt(
     else:
         eq_template = EQUATION_TEMPLATES.get(pde_type, EQUATION_TEMPLATES['poisson'])
     
+    # 自然语言描述（首行）
+    nl_desc = generate_nl_description(case)
+
     # 构建prompt
-    prompt = f"""# Task: Solve {eq_template['title']}
+    prompt = f"""{nl_desc}
+
+# Task: Solve {eq_template['title']}
 
 ## Problem Description
 
@@ -241,51 +360,50 @@ def generate_prompt(
     if math_type:
         prompt += f"\n**Math Type:** {', '.join(math_type)}\n"
 
-    # 添加manufactured solution
-    manufactured = pde_config.get('manufactured_solution', {})
-    if 'u' in manufactured:
-        prompt += f"""
-**Manufactured Solution:** u = {manufactured['u']}
-(Source term f and boundary data are derived from this exact solution)
-"""
-        if pde_type in ["stokes", "navier_stokes"]:
-            prompt += f"**Manufactured Pressure:** p = {manufactured.get('p', 'N/A')}\n"
-    else:
-        source_term = pde_config.get('source_term')
-        if source_term:
+    # ── Source term ──────────────────────────────────────────────────────────
+    # manufactured_solution 已离线预计算为 source_term / initial_condition 等字段，
+    # 此处直接展示预计算结果，不再向 agent 暴露解析解表达式。
+    source_term = pde_config.get('source_term')
+    if source_term:
+        if isinstance(source_term, list):
+            # 向量 PDE（Stokes / NS / LE）：逐分量展示
+            for idx, comp in enumerate(source_term):
+                comp_label = ["x", "y", "z"][idx] if idx < 3 else str(idx)
+                prompt += f"\n**Source Term f_{comp_label}:** {comp}\n"
+        else:
             prompt += f"\n**Source Term:** f = {source_term}\n"
-        initial_condition = pde_config.get('initial_condition')
-        if initial_condition:
-            prompt += f"**Initial Condition:** u0 = {initial_condition}\n"
 
-        # 边界条件（no_exact case 无 manufactured_solution 可推断 BC，必须显式渲染）
-        bc_cfg = case['oracle_config'].get('bc', {})
-        dirichlet = bc_cfg.get('dirichlet', {})
-        if dirichlet:
-            prompt += "\n**Boundary Conditions (Dirichlet):**\n"
-            # dirichlet 可能是单个 dict，也可能是多段 list（向量场 / 分段边界）
-            entries = dirichlet if isinstance(dirichlet, list) else [dirichlet]
-            for entry in entries:
-                bc_on = entry.get('on', 'all')
-                bc_value = entry.get('value', '0.0')
-                # value 可能是向量列表，转为可读字符串
-                if isinstance(bc_value, list):
-                    bc_value_str = f"[{', '.join(str(v) for v in bc_value)}]"
-                else:
-                    bc_value_str = str(bc_value)
-                prompt += f"- u = {bc_value_str}   on {bc_on}\n"
-        neumann = bc_cfg.get('neumann', {})
-        if neumann:
-            prompt += "\n**Boundary Conditions (Neumann):**\n"
-            entries = neumann if isinstance(neumann, list) else [neumann]
-            for entry in entries:
-                nm_on = entry.get('on', 'part')
-                nm_value = entry.get('value', '0.0')
-                if isinstance(nm_value, list):
-                    nm_value_str = f"[{', '.join(str(v) for v in nm_value)}]"
-                else:
-                    nm_value_str = str(nm_value)
-                prompt += f"- ∂u/∂n = {nm_value_str}   on {nm_on}\n"
+    # ── Initial / boundary conditions ────────────────────────────────────────
+    initial_condition = pde_config.get('initial_condition')
+    if initial_condition:
+        prompt += f"**Initial Condition:** u₀ = {initial_condition}\n"
+
+    # Boundary conditions（Dirichlet value 已由预计算脚本替换为显式表达式）
+    bc_cfg = case['oracle_config'].get('bc', {})
+    dirichlet = bc_cfg.get('dirichlet', {})
+    if dirichlet:
+        prompt += "\n**Boundary Conditions (Dirichlet):**\n"
+        entries = dirichlet if isinstance(dirichlet, list) else [dirichlet]
+        for entry in entries:
+            bc_on = entry.get('on', 'all')
+            bc_value = entry.get('value', '0.0')
+            if isinstance(bc_value, list):
+                bc_value_str = f"[{', '.join(str(v) for v in bc_value)}]"
+            else:
+                bc_value_str = str(bc_value)
+            prompt += f"- u = {bc_value_str}   on {bc_on}\n"
+    neumann = bc_cfg.get('neumann', {})
+    if neumann:
+        prompt += "\n**Boundary Conditions (Neumann):**\n"
+        entries = neumann if isinstance(neumann, list) else [neumann]
+        for entry in entries:
+            nm_on = entry.get('on', 'part')
+            nm_value = entry.get('value', '0.0')
+            if isinstance(nm_value, list):
+                nm_value_str = f"[{', '.join(str(v) for v in nm_value)}]"
+            else:
+                nm_value_str = str(nm_value)
+            prompt += f"- ∂u/∂n = {nm_value_str}   on {nm_on}\n"
 
     # 添加系数
     coefficients = pde_config.get('coefficients', {})
@@ -336,10 +454,8 @@ def generate_prompt(
         params = pde_config.get('pde_params', {})
         c = params.get('c', 1.0)
         prompt += f"\n**Wave Speed:** c = {c}\n"
-        ic = pde_config.get('initial_condition')
+        # initial_condition 已在通用段渲染；此处仅补充 initial_velocity（若未被通用段覆盖）
         iv = pde_config.get('initial_velocity')
-        if ic:
-            prompt += f"**Initial Condition u₀:** {ic}\n"
         if iv:
             prompt += f"**Initial Velocity v₀:** {iv}\n"
         prompt += "⚠️ Implement a **second-order** time scheme (e.g. Newmark-β with β=1/4, γ=1/2).\n"
@@ -615,8 +731,10 @@ def solve(case_spec: dict) -> dict:
 ```
 """
 
-    # 添加Agent参数暴露
-    agent_knobs = case.get("agent_knobs", [])
+    # 添加Agent参数暴露（过滤 manufactured_solution 相关 knob，避免泄露实现细节）
+    _HIDDEN_KNOB_NAMES = {"manufactured_solution", "manufactured_u", "exact_solution"}
+    agent_knobs = [k for k in case.get("agent_knobs", [])
+                   if k.get("name") not in _HIDDEN_KNOB_NAMES]
     if agent_knobs:
         prompt += "\n**Agent-Selectable Parameters:**\n"
         for knob in agent_knobs:
