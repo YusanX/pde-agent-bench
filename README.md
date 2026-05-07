@@ -285,7 +285,20 @@ Add an entry to the `SUPPORTED_AGENTS` dictionary in `pdebench/core/llm_client.p
 
 ## Citation
 
-If you use PDEAgent-Bench or its datasets in your research, please cite the following paper:
+## 📝 引用
+
+如果您在研究中使用了 PDEAgent-Bench，请引用我们的论文：
+
+```bibtex
+@misc{huang2026pdeagentbench,
+  title  = {PDEAgent-Bench: A Multi-Metric Benchmark for PDE-to-Solver Code Generation},
+  author = {Zhen Huang and Yushan Yashengjiang and Junhui Li and Huanshuo Dong and Yangbo Wei and Zhezheng Hao and Jiangtao Ma and Songlin Bai and Zhongkai Hao and Xihang Yue and Guangzong Si and Dongming Jiang and Chao Yao and Zhanhua Hu and Jianqing Zhang and Pengwei Liu and Yaomin Shen and Xingyu Ren and Lei Liu and Zikang Xu and Han Li and Qingsong Yao and Hande Dong and Hong Wang},
+  year   = {2026},
+  howpublished={\url{https://github.com/YusanX/pde-agent-bench}}
+}
+```
+
+## 📄 许可证
 
 ```bibtex
 @misc{huang2026pdeagentbench,
