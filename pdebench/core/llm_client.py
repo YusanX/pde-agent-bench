@@ -64,6 +64,7 @@ class LLMClient:
         'claude-opus-4.6': {'provider': 'anthropic', 'model': 'anthropic.claude-opus-4-6-v1'},
         'gemini-3.1-pro': {'provider': 'google', 'model': 'gemini-3.1-pro-preview'},
         'gemini-3.0-flash': {'provider': 'google', 'model': 'gemini-3-flash-preview'},
+        'qwen3.6-plus': {'provider': 'qwen', 'model': 'qwen3.6-plus'},
     }
     
     # 定价信息（USD per 1M tokens）- 实验 4.6 成本追踪
@@ -76,12 +77,13 @@ class LLMClient:
         'sonnet-3.5': {'input': 3.00, 'output': 6.00},
         'claude-opus-4.5': {'input': 5.00, 'output': 25.00}, 
         'haiku': {'input': 1, 'output': 5},
-        'claude-opus-4.6': {'input': 5.00, 'output': 25.00},
+        'claude-opus-4.7': {'input': 5.00, 'output': 25.00},
         # Google
         'gemini-3.0-pro': {'input': 2, 'output': 12},
         'gemini-3.1-pro': {'input': 2, 'output': 12},
         # Qwen 
         'qwen3-max': {'input': 1.2, 'output': 6},
+        'qwen3.6-plus': {'input': 2, 'output': 6},
     }
     
     def __init__(self, agent_name: str, temperature: float = 0.0):

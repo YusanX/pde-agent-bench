@@ -54,12 +54,17 @@ class IncompressibleFlowMetricsComputer(SpecializedMetricsComputer):
             if 'solver_info' in meta:
                 si = meta['solver_info']
                 if isinstance(si, dict):
+                    # Mesh / discretisation info
+                    if 'mesh_resolution' in si:
+                        solver_info['mesh_resolution'] = int(si['mesh_resolution'])
+                    if 'element_degree' in si:
+                        solver_info['element_degree'] = int(si['element_degree'])
                     # Linear solver info
                     if 'ksp_type' in si:
                         solver_info['linear_solver_type'] = si['ksp_type']
                     if 'pc_type' in si:
                         solver_info['preconditioner_type'] = si['pc_type']
-                    # Iterations
+                    # Linear iterations
                     if 'iterations' in si:
                         iterations = si['iterations']
                         if isinstance(iterations, (int, float)):
@@ -67,6 +72,13 @@ class IncompressibleFlowMetricsComputer(SpecializedMetricsComputer):
                         elif isinstance(iterations, list):
                             solver_info['linear_iterations_mean'] = float(np.mean(iterations))
                             solver_info['linear_iterations_max'] = int(np.max(iterations))
+                    # Newton (nonlinear) iterations
+                    if 'nonlinear_iterations' in si:
+                        nl = si['nonlinear_iterations']
+                        if isinstance(nl, (int, float)):
+                            solver_info['newton_iterations'] = int(nl)
+                        elif isinstance(nl, list) and len(nl) > 0:
+                            solver_info['newton_iterations'] = float(np.mean(nl))
                     # Block preconditioner (for incompressible flow)
                     if 'block_preconditioner' in si:
                         solver_info['block_preconditioner'] = si['block_preconditioner']
