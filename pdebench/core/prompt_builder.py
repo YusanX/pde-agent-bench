@@ -776,7 +776,7 @@ def solve(case_spec: dict) -> dict:
 """
 
     # 附加对应库的参考指南（若存在）
-    guide_root = Path(__file__).resolve().parents[2]
+    guide_root = Path(__file__).resolve().parents[1] / "docs"
     if solver_library == "dealii":
         guide_path = guide_root / "DEALII_GUIDE.md"
         guide_title = "deal.II 9.x C++ API Reference Guide"

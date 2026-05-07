@@ -28,10 +28,10 @@ PDEBench 统一评测入口
     python run_benchmark.py --agent gpt-4o --version v1
 
     # 使用 v2 数据集（支持多后端）
-    python run_benchmark.py --agent gpt-4o --version v2 --solver-library firedrake
+    python run_benchmark.py --agent gpt-4o --solver-library firedrake
 
 流程:
-    1. 从 data/benchmark_v1.jsonl 或 data/benchmark_v2.jsonl 加载cases（由 --version 决定）
+    1. data/benchmark_v2.jsonl 加载cases
     2. 对每个case:
        a. 运行oracle获取参考解（带缓存）
        b. 生成prompt

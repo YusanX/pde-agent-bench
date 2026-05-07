@@ -1,377 +1,313 @@
 # PDEAgent-Bench: A Multi-Metric Benchmark for PDE-to-Solver Code Generation
 
-**世界首个评估大型语言模型和AI Agent端到端PDE求解代码生成能力的基准测试系统。**
+**A benchmark system for evaluating the end-to-end PDE solver code generation capabilities of large language models and AI agents.**
 
-[![Status](https://img.shields.io/badge/status-active-success.svg)]()
 [![Python](https://img.shields.io/badge/python-3.9+-blue.svg)]()
-[![FEniCSx](https://img.shields.io/badge/FEniCSx-0.10.0-orange.svg)]()
+[![DOLFINx](https://img.shields.io/badge/DOLFINx-0.10.0-orange.svg)]()
+[![Firedrake](https://img.shields.io/badge/Firedrake-2025-green.svg)]()
+[![deal.II](https://img.shields.io/badge/deal.II-9.x-red.svg)]()
 
-## 🎯 项目愿景
+## Project Overview
 
-PDEBench 评估 AI Agent 是否能"像计算科学家一样思考"：
+PDEBench evaluates whether AI agents can "work like computational scientists":
 
-- **从物理到代码**：给定自然语言描述的 PDE 问题，Agent 需生成完整的 FEniCSx/dolfinx 求解代码
-- **数值稳定性意识**：高对流问题需要SUPG稳定化，Agent 能否识别？
-- **网格无关验证**：Agent 和 Oracle 可能使用不同网格，系统通过插值进行公平比较
-- **精度-速度权衡**：支持 fix_accuracy（比速度）和 fix_time（比精度）两种评测模式
+- **From physics to code**: Given a PDE problem described in natural language, the LLM/agent must generate complete FEM solver code.
+- **Multi-backend support**: Supports three solver frameworks: DOLFINx (Python), Firedrake (Python), and deal.II (C++).
+- **Two datasets**: v1 (241 cases, DOLFINx only) and v2 (645 cases, all backends), covering 11 PDE types.
+- **Two-dimensional evaluation**: Measures accuracy with relative L2 error and efficiency with runtime, compared against oracle reference solutions while tolerating mesh differences.
 
-## 🚀 快速开始
+## Quick Start
 
-### 1. 安装环境
+### 1. Install the Environment
 
 ```bash
-# 创建 conda 环境并安装 FEniCSx
+# Create a conda environment and install DOLFINx
 conda create -n pdebench python=3.11
 conda activate pdebench
 conda install -c conda-forge fenics-dolfinx=0.10.0 mpich petsc4py
 
-# 安装 PDEBench
-cd pde-agent-bench
+# Install PDEBench
 pip install -e .
 ```
 
-### 2. 评测你的 Agent
+> **Firedrake / deal.II**: These two backends run through Docker by default and do not require local installation.  
+> Add `--solver-library firedrake` or `--solver-library dealii` at runtime to invoke the corresponding image automatically.
 
-假设你的 Agent 已经生成了求解器代码，目录结构如下：
-
-```
-results/my_agent/
-├── poisson_simple/
-│   └── solver.py
-├── heat_simple/
-│   └── solver.py
-└── ...
-```
-
-运行统一评测入口：
+### 2. Configure API Keys
 
 ```bash
-python scripts/run_evaluation.py \
-    --agent-name my_agent \
-    --agent-dir results/my_agent \
-    --cases-dir cases \
-    --output results/my_agent/evaluation.json \
-    --modes fix_accuracy fix_time \
-    --timeout 300
+# OpenAI
+export OPENAI_API_KEY="sk-..."
+
+# Anthropic
+export ANTHROPIC_API_KEY="sk-ant-..."
+
+# Google
+export GOOGLE_API_KEY="..."
+
+# Qwen
+export DASHSCOPE_API_KEY="..."
 ```
 
-### 3. 生成排行榜
+### 3. Run Evaluations
 
 ```bash
-python scripts/generate_leaderboard_v2.py \
-    --results results/*/evaluation.json \
-    --output leaderboard_v2.html
+# Evaluate a single LLM using the v2 dataset and the DOLFINx backend
+python scripts/run_benchmark.py --agent gpt-4o
+
+# Evaluate and compare multiple LLMs
+python scripts/run_benchmark.py --agent gpt-4o sonnet-3.5 gemini
+
+# Use the Firedrake backend with Docker automatically
+python scripts/run_benchmark.py --agent gpt-4o --solver-library firedrake
+
+# Use the deal.II backend, where the agent generates C++ code and Docker is invoked automatically
+python scripts/run_benchmark.py --agent gpt-4o --solver-library dealii
+
+# Test only the v1 dataset with 241 DOLFINx cases
+python scripts/run_benchmark.py --agent gpt-4o --version v1
 ```
 
-在浏览器中打开 `leaderboard_v2.html` 查看：
-- 总体排行榜（速度和精度）
-- PDE类型子榜单（椭圆型、抛物型等）
-- 专用指标分析（效率、能量衰减、CFL数等）
+## Evaluation Entry Point
 
-## 📖 Agent 开发指南
+All evaluations run through the single entry point `scripts/run_benchmark.py`:
 
-### Agent 任务说明
+```
+usage: run_benchmark.py [-h] --agent AGENT [AGENT ...] [--output OUTPUT]
+                        [--version {v1,v2}] [--cases CASE_ID ...]
+                        [--equation-types TYPE ...] [--skip-generation]
+                        [--solver-path PATH] [--eval-existing-dir DIR]
+                        [--timeout SECONDS] [--max-attempts N]
+                        [--solver-library {dolfinx,firedrake,dealii}]
+```
 
-详见 [`AGENT_TASK.md`](AGENT_TASK.md)
+### Common Use Cases
 
-**核心要求：**
-1. 读取 `cases/{case_id}/description.md` 了解问题
-2. 生成符合规范的 `solver.py`
-3. 保存到 `results/{agent_name}/{case_id}/solver.py`
-
-### Solver 接口规范
-
-**命令行参数：**
 ```bash
-python solver.py \
-    --resolution 128 \
-    --degree 2 \
-    --outdir output/ \
-    [--dt 0.01]  # 时间相关PDE需要
+# Test only specific cases
+python scripts/run_benchmark.py --agent gpt-4o --cases poisson_basic heat_basic
+
+# Test only specific equation types
+python scripts/run_benchmark.py --agent gpt-4o --equation-types poisson heat
+
+# Multi-attempt mode, retrying with the previous error message
+python scripts/run_benchmark.py --agent gpt-4o --max-attempts 3
+
+# Skip LLM calls and directly evaluate existing solvers
+python scripts/run_benchmark.py --agent gpt-4o --skip-generation
+
+# Evaluate a specified solver file
+python scripts/run_benchmark.py --agent gpt-4o \
+    --solver-path results/gpt-4o/poisson_basic/solver.py \
+    --cases poisson_basic
+
+# Batch-evaluate all solvers in an existing directory without calling the LLM again
+python scripts/run_benchmark.py --agent qwen3-max \
+    --eval-existing-dir results/qwen3-max
 ```
 
-**输出文件：**
+### Arguments
 
-1. `solution.npz` (必需)：
-```python
-np.savez('output/solution.npz',
-    x=x_grid,  # 1D array
-    y=y_grid,  # 1D array
-    u=u_grid   # 2D array (ny, nx)
-)
-```
+| Argument | Default | Description |
+|------|--------|------|
+| `--agent` | Required | LLM name; multiple agents are supported. See the supported list below. |
+| `--version` | `v2` | Dataset version: `v1` (241 cases) or `v2` (645 cases). |
+| `--solver-library` | `dolfinx` | Solver backend: `dolfinx` \| `firedrake` \| `dealii`. |
+| `--cases` | All | Case IDs to evaluate, separated by spaces. |
+| `--equation-types` | All | Equation types to evaluate, such as `poisson heat`. |
+| `--max-attempts` | `1` | Maximum number of attempts in multi-attempt mode. |
+| `--timeout` | `300` | Per-case execution timeout in seconds. |
+| `--output` | `results/` | Output directory for results. |
+| `--eval-existing-dir` | None | Batch-evaluate an existing solver directory. |
+| `--skip-generation` | No | Skip LLM calls and reuse existing solvers. |
 
-2. `meta.json` (必需)：
+## Supported LLMs and Agents
+
+### LLMs (Language Models Only)
+
+| Name | Provider |
+|------|--------|
+| `gpt-4o`, `gpt-4o-mini` | OpenAI |
+| `gpt-5.1`, `gpt-5.2`, `gpt-5.4` | OpenAI |
+| `o3-mini` | OpenAI |
+| `sonnet-3.5`, `sonnet-3.6` | Anthropic |
+| `claude-opus-4.7`, `claude-opus-4.6` | Anthropic |
+| `haiku` | Anthropic |
+| `gemini`, `gemini-3.0-pro`, `gemini-3.0-flash`, `gemini-3.1-pro` | Google |
+| `qwen3-max`, `qwen3.6-plus` | Qwen |
+
+### Code Agents (External Agent Frameworks)
+
+| Name | Description | Config File |
+|------|------|----------|
+| `codepde` | CodePDE Agent | `pdebench/configs/codepde.json` |
+| `openhands` | OpenHands Agent | `pdebench/configs/openhands.json` |
+| `mini-swe-agent` | MiniSWE-Agent | `pdebench/configs/mini-swe-agent.json` |
+
+Code agents use the same prompts as LLMs. Environment variables and timeouts are configured through `pdebench/configs/{agent}.json`.
+
+## Datasets
+
+### v2 (Recommended, 645 Cases)
+
+`data/benchmark_v2.jsonl` contains one JSON object per line, covers all three solver backends, and uses the following case structure:
+
 ```json
 {
-  "wall_time_sec": 1.23,
-  "solver_info": {
-    "ksp_type": "cg",
-    "pc_type": "hypre",
-    "iterations": 45
-  }
+  "id": "poisson_basic",
+  "oracle_config": {
+    "pde": { "type": "poisson", "..." },
+    "domain": { "type": "unit_square" },
+    "mesh": { "resolution": 120 },
+    "bc": { "..." },
+    "output": { "format": "npz", "grid": { "nx": 50, "ny": 50 } }
+  },
+  "evaluation_config": {
+    "target_metric": "rel_L2_grid",
+    "timeout_sec": 300,
+    "accuracy_tolerance": 10,
+    "time_tolerance": 3
+  },
+  "supported_libraries": ["dolfinx", "firedrake", "dealii"]
 }
 ```
 
-## 📁 项目结构（2025-12重构）
+### v1 (241 Cases, DOLFINx Only)
+
+`data/benchmark_v1.jsonl` is a smaller subset for compatibility with earlier experiments and supports only the `dolfinx` backend.
+
+### Supported PDE Types
+
+| Type | Keywords |
+|------|--------|
+| Elliptic | `poisson`, `helmholtz`, `biharmonic` |
+| Parabolic | `heat`, `reaction_diffusion` |
+| Hyperbolic | `wave`, `burgers`, `convection_diffusion` |
+| Fluid | `stokes`, `navier_stokes` |
+| Solid | `linear_elasticity` |
+
+## Project Structure
 
 ```
 pdebench/
-├── pdebench/                    # Python 包
-│   ├── harness/                # 🆕 评测编排器
-│   │   ├── case_runner.py      # 单case运行器
-│   │   └── batch_evaluator.py  # 批量评测器
-│   │
-│   ├── metrics/                # 🆕 指标计算模块
-│   │   ├── scoring.py          # 通用评分逻辑
-│   │   ├── tier_levels.py      # 等级判定
-│   │   └── specialized/        # PDE专用指标
-│   │       ├── elliptic.py     # 椭圆型指标
-│   │       ├── parabolic.py    # 抛物型指标
-│   │       └── hyperbolic.py   # 双曲型指标
-│   │
-│   ├── oracle/                 # Oracle系统（Ground Truth生成）
-│   │   ├── core/              # generate/solve/evaluate
-│   │   └── solvers/           # PDE求解器
-│   │
-│   ├── sandbox/               # 执行沙箱
-│   │   └── executor.py        # 隔离执行Agent代码
-│   │
-│   └── evaluation/            # 网格无关验证器
-│       └── validator.py       # 插值 + 误差计算
+├── data/
+│   ├── benchmark_v1.jsonl      # v1 dataset (241 cases, DOLFINx)
+│   └── benchmark_v2.jsonl      # v2 dataset (645 cases, multi-backend)
 │
-├── cases/                  # 测试案例（11个）
-│   ├── poisson_simple/
-│   │   ├── config.json        # 案例配置
-│   │   └── description.md     # 问题描述（给Agent看）
-│   │ 
-│   ├── heat_simple/
-│   └── ...
+├── scripts/
+│   └── run_benchmark.py        # Single evaluation entry point
+│   
 │
-├── scripts/                   # 工具脚本
-│   ├── run_evaluation.py      # 🆕 统一评测入口
-│   ├── generate_leaderboard_v2.py  # 排行榜生成器
-│   └── build_cases.py         # 从Oracle生成cases
+├── pdebench/                   # Python package
+│   ├── core/
+│   │   ├── prompt_builder.py   # Prompt generation with API guide injection
+│   │   ├── llm_client.py       # LLM calls for OpenAI/Anthropic/Google/Qwen
+│   │   └── feedback_prompt.py  # Multi-attempt feedback prompt
+│   │
+│   ├── oracle/                 # Oracle reference solution system
+│   │   ├── oracle.py           # Unified entry point dispatching by PDE type
+│   │   ├── {pde_type}.py       # DOLFINx implementation for each PDE
+│   │   ├── firedrake_oracle/   # Firedrake backend implementation
+│   │   ├── dealii_oracle/      # deal.II backend implementation with .cc programs
+│   │   └── docker_bridge.py    # Bridge for running inside Docker containers
+│   │
+│   ├── sandbox/
+│   │   ├── executor.py         # Isolated execution for Python solvers
+│   │   └── cpp_executor.py     # C++ solver compilation and execution for deal.II
+│   │
+│   ├── agents/                 # Code agent wrappers
+│   │   ├── codepde_wrapper.py
+│   │   ├── openhands_wrapper.py
+│   │   └── mini_swe_agent_wrapper.py
+│   │
+│   ├── metrics/
+│   │   └── specialized/        # PDE-specific metric computation for 11 classes
+│   │
+│   ├── analysis/
+│   │   ├── gate_analyzer.py    # Pass-rate gate analysis
+│   │   └── error_classifier.py # Error classification
+│   │
+│   ├── configs/                # Code agent configuration
+│   │   ├── codepde.json
+│   │   ├── openhands.json
+│   │   └── mini-swe-agent.json
+│   │
+│   └── docs/                   # API reference guides injected into prompts
+│       ├── DOLFINX_GUIDE.md
+│       ├── FIREDRAKE_GUIDE.md
+│       └── DEALII_GUIDE.md
 │
-├── results/                   # 评测结果
-│   ├── gemini-2.5/
-│   │   ├── poisson_simple/solver.py
-│   │   └── evaluation.json
-│   └── gpt-4/
-│       └── ...
+├── docker/                     # Docker image definitions
+├── experiments/                # Experiment run scripts
+│   ├── minisweagent.sh
+│   └── openhands.sh
 │
-└── README.md                  # 本文件
+├── results/                    # Evaluation result output directory
+└── tests/                      # Unit tests
 ```
 
-## 🎯 评测模式
+## Docker Support
 
-### Mode 1: Fix Accuracy（固定精度，比速度）
-
-目标：在满足精度要求的前提下，越快越好。
-
-**评分公式：**
-```
-score = 100 × min(time_budget / runtime, 1.0)
-```
-
-**满分条件：** 既快又准
-
-### Mode 2: Fix Time（固定时间，比精度）
-
-目标：在时间预算内，精度越高越好。
-
-**评分公式：**
-```
-score = 100 × max(0, 1 - error / target_error)
-```
-
-**满分条件：** 误差接近零
-
-### 三级难度（Tier Levels）
-
-每个case有3个难度等级：
-- **Level 1 (Easy)**: 基础目标
-- **Level 2 (Medium)**: 标准目标
-- **Level 3 (Hard)**: 困难目标
-
-## 📊 PDE类型与专用指标
-
-### Elliptic（椭圆型）
-- **典型问题**: Poisson、Helmholtz
-- **专用指标**: DOF/s效率、求解器迭代次数、条件数估计
-
-### Parabolic（抛物型）
-- **典型问题**: Heat equation、扩散方程
-- **专用指标**: WorkRate、能量衰减率、CFL数、最大值原理验证
-
-### Hyperbolic（双曲型）
-- **典型问题**: 波动方程、对流方程
-- **专用指标**: 激波分辨率、TV范数、振荡检测
-
-## 🔧 高级用法
-
-### 评测特定cases
+The Firedrake and deal.II backends run in Docker containers by default and do not require local installation:
 
 ```bash
-python scripts/run_evaluation.py \
-    --agent-name my_agent \
-    --agent-dir results/my_agent \
-    --cases poisson_simple heat_simple \
-    --output results/my_agent/partial.json
+# Pull images
+docker pull pdebench/firedrake:latest
+docker pull pdebench/dealii:latest
+
+# Run evaluations with Docker invoked automatically
+python scripts/run_benchmark.py --agent gpt-4o --solver-library firedrake
+python scripts/run_benchmark.py --agent gpt-4o --solver-library dealii
 ```
 
-### 仅运行accuracy模式
+## Developer Guide
 
-```bash
-python scripts/run_evaluation.py \
-    --agent-name my_agent \
-    --agent-dir results/my_agent \
-    --modes fix_accuracy \
-    --output results/my_agent/accuracy_only.json
+### Add a New LLM
+
+Add an entry to the `SUPPORTED_AGENTS` dictionary in `pdebench/core/llm_client.py`:
+
+```python
+'my-model': {'provider': 'openai', 'model': 'my-model-id'},
 ```
 
-### 自定义超时
+### Add a New Code Agent
 
-```bash
-python scripts/run_evaluation.py \
-    --agent-name my_agent \
-    --agent-dir results/my_agent \
-    --timeout 600 \
-    --output results/my_agent/evaluation.json
-```
+1. Create `my_agent_wrapper.py` under `pdebench/agents/` and inherit from `BaseAgent`.
+2. Implement `generate_solution(prompt, context)` and return an `AgentResponse`.
+3. Register it in `pdebench/agents/__init__.py`: `AgentRegistry.register('my-agent', MyAgentWrapper)`.
+4. Add its configuration in `pdebench/configs/my-agent.json`.
 
-## 🧪 Oracle系统（开发者）
+### Add a New PDE Type
 
-Oracle系统用于生成Ground Truth和创建新的测试案例：
+1. Add `my_pde.py` under `pdebench/oracle/` with a DOLFINx implementation.
+2. Import it in `oracle/oracle.py` and add a `pde_type` branch.
+3. To support Firedrake or deal.II, add implementations in the corresponding subdirectories.
 
-### 生成新的测试案例
+## Citation
 
-```bash
-# 从data/benchmark.jsonl生成完整的cases/目录
-python scripts/build_cases.py \
-    --data data/benchmark.jsonl \
-    --output cases \
-    --skip-oracle  # 快速模式（使用默认baseline）
-
-# 或运行完整Oracle（较慢但更准确）
-python scripts/build_cases.py \
-    --data data/benchmark.jsonl \
-    --output cases
-```
-
-### 预生成Oracle缓存
-
-为了加速评测，建议预先生成所有Oracle缓存：
-
-```bash
-# 对每个case运行一次Oracle
-for case_dir in cases/*/; do
-    case_id=$(basename "$case_dir")
-    python -m pdebench.cli run "cases/$case_id/config.json" \
-        --outdir "cases/$case_id/oracle_cache"
-done
-```
-
-## 📈 评测结果格式
-
-### 单case结果 (`test_output/result_fix_accuracy.json`)
-
-```json
-{
-  "case_id": "poisson_simple",
-  "test_mode": "fix_accuracy",
-  "status": "PASSED",
-  "runtime_sec": 2.345,
-  "error": 0.000123,
-  "score": 85.3,
-  "tier_levels": {
-    "passed": [1, 2],
-    "total": 3
-  },
-  "specialized_metrics": {
-    "dof": 16384,
-    "efficiency_dof_per_sec": 6985.4,
-    "linear_iterations_mean": 45.2
-  }
-}
-```
-
-### 批量评测结果 (`evaluation.json`)
-
-```json
-{
-  "agent_name": "gemini-2.5",
-  "evaluation_date": "2025-12-27T...",
-  "summary": {
-    "fix_accuracy": {
-      "total_cases": 11,
-      "passed": 10,
-      "pass_rate": 0.909,
-      "avg_score": 76.5
-    },
-    "fix_time": {...}
-  },
-  "results": {...}
-}
-```
-
-## 🌟 架构特点
-
-### 文件协议（File Protocol）
-
-借鉴 SWE-bench 设计，Agent 和评测系统通过标准化文件交互：
-- ✅ **无需适配器**：任何能生成规范 `solver.py` 的系统都可使用
-- ✅ **Agent解耦**：支持 OpenHands、SWE-agent、MiniMax、LLM直接输出等
-- ✅ **可复现**：所有结果保存为结构化JSON
-
-### 模块化设计
-
-- **`harness/`**: 流程编排，不关心PDE细节
-- **`metrics/`**: 纯函数式评分，易于测试
-- **`specialized/`**: PDE专用逻辑，易于扩展
-- **`oracle/`**: Ground Truth生成，与评测解耦
-
-
-## 🔮 未来工作
-
-- [ ] 添加更多PDE类型（Stokes、Navier-Stokes）
-- [ ] 支持3D问题
-- [ ] 自适应网格细化
-- [ ] Docker完全隔离
-- [ ] 多Agent对比分析工具
-- [ ] 在线评测平台
-
-## 🎓 研究应用
-
-本系统适用于：
-- 评估LLM的科学代码生成能力
-- 研究AI Agent在数值计算中的表现
-- 构建科学计算训练数据集
-- 分析数值稳定性的AI理解能力
-
-## 📝 引用
-
-如果您在研究中使用了 PDEAgent-Bench，请引用我们的论文：
+If you use PDEAgent-Bench or its datasets in your research, please cite the following paper:
 
 ```bibtex
 @misc{huang2026pdeagentbench,
   title  = {PDEAgent-Bench: A Multi-Metric Benchmark for PDE-to-Solver Code Generation},
-  author = {Zhen Huang and Yushan Yashengjiang and Junhui Li and Huanshuo Dong and Yangbo Wei and Zhezheng Hao and Jiangtao Ma and Songlin Bai and Zhongkai Hao and Xihang Yue and Guangzong Si and Dongming Jiang and Chao Yao and Zhanhua Hu and Jianqing Zhang and Pengwei Liu and Yaomin Shen and Xingyu Ren and Lei Liu and Zikang Xu and Han Li and Qingsong Yao and Hande Dong and Hong Wang},
+  author = {Zhen Huang and Yushan Yashengjiang and Junhui Li and Huanshuo Dong and
+            Yangbo Wei and Zhezheng Hao and Jiangtao Ma and Songlin Bai and
+            Zhongkai Hao and Xihang Yue and Guangzong Si and Dongming Jiang and
+            Chao Yao and Zhanhua Hu and Jianqing Zhang and Pengwei Liu and
+            Yaomin Shen and Xingyu Ren and Lei Liu and Zikang Xu and Han Li and
+            Qingsong Yao and Hande Dong and Hong Wang},
   year   = {2026},
-  howpublished={\url{https://github.com/YusanX/pde-agent-bench}}
+  note   = {Under review at NeurIPS 2026}
 }
 ```
 
-## 📄 许可证
+## License
 
-本项目用于 AI 科学编程能力评估研究。
+This project is intended for research on evaluating AI scientific programming capabilities.
 
-## 🙏 致谢
+## Acknowledgements
 
-- FEniCSx 团队提供优秀的有限元框架
-- PETSc 提供强大的线性代数工具
-- SWE-bench 提供评测系统设计灵感
-
----
-
-**重要更新**：本项目已于2025年12月完成重构，实现统一评测入口，支持任意Agent评测。详见 [REFACTORING_SUMMARY.md](REFACTORING_SUMMARY.md)
+- The [FEniCSx / DOLFINx](https://fenicsproject.org/) team
+- The [Firedrake](https://www.firedrakeproject.org/) team
+- The [deal.II](https://www.dealii.org/) team
+- [SWE-bench](https://www.swebench.com/) for inspiration in evaluation design
