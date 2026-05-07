@@ -358,6 +358,7 @@ done
   title  = {PDEAgent-Bench: A Multi-Metric Benchmark for PDE-to-Solver Code Generation},
   author = {Zhen Huang and Yushan Yashengjiang and Junhui Li and Huanshuo Dong and Yangbo Wei and Zhezheng Hao and Jiangtao Ma and Songlin Bai and Zhongkai Hao and Xihang Yue and Guangzong Si and Dongming Jiang and Chao Yao and Zhanhua Hu and Jianqing Zhang and Pengwei Liu and Yaomin Shen and Xingyu Ren and Lei Liu and Zikang Xu and Han Li and Qingsong Yao and Hande Dong and Hong Wang},
   year   = {2026},
+  howpublished={\url{https://github.com/YusanX/pde-agent-bench}}
 }
 ```
 
