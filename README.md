@@ -1,4 +1,4 @@
-# PDEBench: AI-Driven PDE Solver Code Generation Benchmark
+# PDEAgent-Bench: A Multi-Metric Benchmark for PDE-to-Solver Code Generation
 
 **世界首个评估大型语言模型和AI Agent端到端PDE求解代码生成能力的基准测试系统。**
 
@@ -348,6 +348,18 @@ done
 - 研究AI Agent在数值计算中的表现
 - 构建科学计算训练数据集
 - 分析数值稳定性的AI理解能力
+
+## 📝 引用
+
+如果您在研究中使用了 PDEAgent-Bench，请引用我们的论文：
+
+```bibtex
+@misc{huang2026pdeagentbench,
+  title  = {PDEAgent-Bench: A Multi-Metric Benchmark for PDE-to-Solver Code Generation},
+  author = {Zhen Huang and Yushan Yashengjiang and Junhui Li and Huanshuo Dong and Yangbo Wei and Zhezheng Hao and Jiangtao Ma and Songlin Bai and Zhongkai Hao and Xihang Yue and Guangzong Si and Dongming Jiang and Chao Yao and Zhanhua Hu and Jianqing Zhang and Pengwei Liu and Yaomin Shen and Xingyu Ren and Lei Liu and Zikang Xu and Han Li and Qingsong Yao and Hande Dong and Hong Wang},
+  year   = {2026},
+}
+```
 
 ## 📄 许可证
 
