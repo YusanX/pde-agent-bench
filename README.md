@@ -281,7 +281,7 @@ If you use PDEAgent-Bench in your research, please cite our paper:
 ```bibtex
 @misc{huang2026pdeagentbench,
   title  = {PDEAgent-Bench: A Multi-Metric, Multi-Library Benchmark for PDE Solver Generation},
-  author = {Zhen Huang, Yushan Yashengjiang, Junhui Li, Huanshuo Dong,
+  author = {Zhen Hang, Yushan Yashengjiang, Junhui Li, Huanshuo Dong,
             Yangbo Wei, Zhezheng Hao, Jiangtao Ma, Songlin Bai,
             Zhongkai Hao, Xihang Yue, Guangzong Si, Dongming Jiang,
             Chao Yao, Zhanhua Hu, Jianqing Zhang, Pengwei Liu,
