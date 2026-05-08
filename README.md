@@ -1,4 +1,4 @@
-# PDEAgent-Bench: A Multi-Metric Benchmark for PDE-to-Solver Code Generation
+# PDEAgent-Bench: A Multi-Metric, Multi-Library Benchmark for PDE Solver Generation
 
 **A benchmark system for evaluating the end-to-end PDE solver code generation capabilities of large language models and AI agents.**
 
@@ -280,7 +280,7 @@ If you use PDEAgent-Bench in your research, please cite our paper:
 
 ```bibtex
 @misc{huang2026pdeagentbench,
-  title  = {PDEAgent-Bench: A Multi-Metric Benchmark for PDE-to-Solver Code Generation},
+  title  = {PDEAgent-Bench: A Multi-Metric, Multi-Library Benchmark for PDE Solver Generation},
   author = {Zhen Huang, Yushan Yashengjiang, Junhui Li, Huanshuo Dong,
             Yangbo Wei, Zhezheng Hao, Jiangtao Ma, Songlin Bai,
             Zhongkai Hao, Xihang Yue, Guangzong Si, Dongming Jiang,
