@@ -1,0 +1,44 @@
+"""
+Code Agent 模块
+
+提供统一的 Code Agent 接口和实现。
+
+使用方式：
+    from pdebench.agents import get_agent, AgentRegistry
+    
+    # 创建 agent
+    agent = get_agent('swe-agent', config={'model': 'gpt-4'})
+    
+    # 生成解决方案
+    response = agent.generate_solution(prompt, context)
+    
+    # 清理
+    agent.cleanup()
+"""
+
+from .base_agent import BaseAgent, AgentResponse
+from .agent_registry import AgentRegistry, get_agent
+
+# 导入所有 agent wrappers
+
+from .codepde_wrapper import CodePDEWrapper
+from .openhands_wrapper import OpenHandsWrapper
+from .mini_swe_agent_wrapper import MiniSWEAgentWrapper
+
+
+# 注册所有 Agent
+AgentRegistry.register('codepde', CodePDEWrapper)
+AgentRegistry.register('openhands', OpenHandsWrapper)
+AgentRegistry.register('mini-swe-agent', MiniSWEAgentWrapper)
+
+
+# 导出
+__all__ = [
+    'BaseAgent',
+    'AgentResponse',
+    'AgentRegistry',
+    'get_agent',
+    'CodePDEWrapper',
+    'OpenHandsWrapper',
+    'MiniSWEAgentWrapper',
+]

@@ -1,0 +1,8 @@
+{
+"model": "openai/gpt-4o",
+"api_key": "",
+"base_url": "",
+"cost_limit": 3.0,
+"step_limit": 50,
+"timeout": 600
+}

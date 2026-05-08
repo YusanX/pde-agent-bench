@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+*.pyc
+# Pytest
+.pytest_cache/
+
+# PDEBench generated files
+artifacts_bench/
+*.npz
+*.dat
+*.json
+!cases/**/*.json
+!pdebench/**/*.json
+!artifacts_bench/meta.json
+!benchmark_report.json
+!data/**/*.json
+
+pdebench/sandbox/.dealii_agent_build/
+
+# IDE
+.vscode/
+.idea/
+
+
+# System
+.DS_Store
+
+

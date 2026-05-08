@@ -1,0 +1,169 @@
+"""Poisson oracle solver (elliptic)."""
+from __future__ import annotations
+
+import time
+from typing import Any, Dict
+
+import sympy as sp
+import ufl
+from dolfinx import fem
+from dolfinx.fem.petsc import LinearProblem
+from petsc4py import PETSc
+
+from .common import (
+    OracleResult,
+    compute_L2_error,
+    compute_rel_L2_grid,
+    create_kappa_field,
+    create_mesh,
+    create_scalar_space,
+    locate_all_boundary_dofs,
+    build_dirichlet_bc,
+    interpolate_expression,
+    parse_expression,
+    sample_scalar_on_grid,
+    _sample_scalar_grid,
+    _mms_local_dict,
+    _mms_coords,
+    _div_kappa_grad_sym,
+    _eval_exact_sym_on_grid,
+    _apply_domain_mask,
+)
+
+
+class PoissonSolver:
+    """Poisson equation solver for oracle ground truth."""
+
+    def solve(self, case_spec: Dict[str, Any]) -> OracleResult:
+        # ⏱️ 开始计时整个求解流程（包括网格生成、函数空间构建、求解、采样）
+        t_start = time.perf_counter()
+        
+        msh = create_mesh(case_spec["domain"], case_spec["mesh"])
+        dim = msh.geometry.dim
+        V = create_scalar_space(
+            msh, case_spec["fem"]["family"], case_spec["fem"]["degree"]
+        )
+
+        pde_cfg = case_spec["pde"]
+        coeffs = pde_cfg.get("coefficients", {})
+        kappa_spec = coeffs.get("kappa", {"type": "constant", "value": 1.0})
+        kappa = create_kappa_field(msh, kappa_spec)
+
+        x = ufl.SpatialCoordinate(msh)
+        manufactured = pde_cfg.get("manufactured_solution", {})
+        source_expr = pde_cfg.get("source_term")
+        u_exact = None
+        f_expr = None
+
+        if "u" in manufactured:
+            local_dict = _mms_local_dict(dim)
+            coords = _mms_coords(dim)
+            u_sym = sp.sympify(manufactured["u"], locals=local_dict)
+
+            if kappa_spec.get("type", "constant") == "expr":
+                kappa_sym = sp.sympify(kappa_spec["expr"], locals=local_dict)
+            else:
+                kappa_sym = sp.sympify(kappa_spec.get("value", 1.0))
+
+            f_sym = -_div_kappa_grad_sym(u_sym, kappa_sym, coords)
+            f_expr = parse_expression(f_sym, x)
+
+            u_exact_expr = parse_expression(u_sym, x)
+            u_exact = fem.Function(V)
+            interpolate_expression(u_exact, u_exact_expr)
+        elif source_expr is not None:
+            f_expr = parse_expression(source_expr, x)
+
+        u = ufl.TrialFunction(V)
+        v = ufl.TestFunction(V)
+        a = ufl.inner(kappa * ufl.grad(u), ufl.grad(v)) * ufl.dx
+        L = (f_expr if f_expr is not None else 0.0) * v * ufl.dx
+
+        bcs = []
+        if u_exact is not None:
+            boundary_dofs = locate_all_boundary_dofs(msh, V)
+            bcs = [fem.dirichletbc(u_exact, boundary_dofs)]
+        else:
+            bc_cfg = case_spec.get("bc", {}).get("dirichlet", {})
+            bc_value = bc_cfg.get("value", "0.0")
+            bcs = [build_dirichlet_bc(msh, V, bc_value)]
+
+        solver_params = case_spec.get("oracle_solver", {})
+        petsc_options = {
+            "ksp_type": solver_params.get("ksp_type", "cg"),
+            "pc_type": solver_params.get("pc_type", "hypre"),
+            "ksp_rtol": solver_params.get("rtol", 1e-10),
+            "ksp_atol": solver_params.get("atol", 1e-12),
+        }
+
+        problem = LinearProblem(
+            a,
+            L,
+            bcs=bcs,
+            petsc_options=petsc_options,
+            petsc_options_prefix="oracle_poisson_",
+        )
+
+        u_h = problem.solve()
+
+        grid_cfg = case_spec["output"]["grid"]
+        u_grid = _sample_scalar_grid(u_h, grid_cfg)
+
+        baseline_error = 0.0
+        solver_info = {
+            "ksp_type": petsc_options["ksp_type"],
+            "pc_type": petsc_options["pc_type"],
+            "rtol": petsc_options["ksp_rtol"],
+        }
+        if u_exact is not None:
+            # 直接在格点上代入解析式求精确值，避免 FEM 投影误差
+            # _apply_domain_mask 将域外点（u_grid 中的 NaN）同步到精确解
+            u_exact_grid = _apply_domain_mask(u_grid, _eval_exact_sym_on_grid(u_sym, coords, grid_cfg))
+            baseline_error = compute_rel_L2_grid(u_grid, u_exact_grid)
+            u_grid = u_exact_grid
+        else:
+            ref_cfg = case_spec.get("reference_config", {})
+            ref_mesh_spec = ref_cfg.get("mesh", case_spec["mesh"])
+            ref_fem_spec = ref_cfg.get("fem", case_spec["fem"])
+            ref_solver = ref_cfg.get("oracle_solver", {})
+
+            ref_msh = create_mesh(case_spec["domain"], ref_mesh_spec)
+            ref_V = create_scalar_space(ref_msh, ref_fem_spec["family"], ref_fem_spec["degree"])
+            ref_kappa = create_kappa_field(ref_msh, kappa_spec)
+            ref_x = ufl.SpatialCoordinate(ref_msh)
+            ref_f_expr = parse_expression(source_expr, ref_x) if source_expr is not None else 0.0
+            ref_u = ufl.TrialFunction(ref_V)
+            ref_v = ufl.TestFunction(ref_V)
+            ref_a = ufl.inner(ref_kappa * ufl.grad(ref_u), ufl.grad(ref_v)) * ufl.dx
+            ref_L = ref_f_expr * ref_v * ufl.dx
+            ref_bcs = [build_dirichlet_bc(ref_msh, ref_V, bc_value)]
+            ref_petsc_options = {
+                "ksp_type": ref_solver.get("ksp_type", petsc_options["ksp_type"]),
+                "pc_type": ref_solver.get("pc_type", petsc_options["pc_type"]),
+                "ksp_rtol": ref_solver.get("rtol", 1e-12),
+                "ksp_atol": ref_solver.get("atol", 1e-14),
+            }
+            ref_problem = LinearProblem(
+                ref_a,
+                ref_L,
+                bcs=ref_bcs,
+                petsc_options=ref_petsc_options,
+                petsc_options_prefix="oracle_poisson_ref_",
+            )
+            ref_u_h = ref_problem.solve()
+            ref_grid = _sample_scalar_grid(ref_u_h, grid_cfg)
+            baseline_error = compute_rel_L2_grid(u_grid, ref_grid)
+            u_grid = ref_grid
+            solver_info["reference_resolution"] = ref_mesh_spec.get("resolution")
+            solver_info["reference_degree"] = ref_fem_spec.get("degree")
+
+        # ⏱️ 结束计时（包含完整流程）
+        baseline_time = time.perf_counter() - t_start
+
+        return OracleResult(
+            baseline_error=float(baseline_error),
+            baseline_time=float(baseline_time),
+            reference=u_grid,
+            solver_info=solver_info,
+            num_dofs=V.dofmap.index_map.size_global,
+        )
