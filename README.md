@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="PDEAgent-Bench logo" width="320" />
+</p>
+
 # PDEAgent-Bench: A Multi-Metric, Multi-Library Benchmark for PDE Solver Generation
 
 **A benchmark system for evaluating the end-to-end PDE solver code generation capabilities of large language models and AI agents.**
@@ -6,6 +10,8 @@
 [![DOLFINx](https://img.shields.io/badge/DOLFINx-0.10.0-orange.svg)]()
 [![Firedrake](https://img.shields.io/badge/Firedrake-2025-green.svg)]()
 [![deal.II](https://img.shields.io/badge/deal.II-9.x-red.svg)]()
+
+🌐 **Live demo / leaderboard:** <https://zeroeclipse00.github.io/pde-agent-bench-github-pages/>
 
 ## Project Overview
 
