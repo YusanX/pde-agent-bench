@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="PDEAgent-Bench logo" width="320" />
+  <img src="assets/logo.png" alt="PDEAgent-Bench logo" width="600" />
 </p>
 
 # PDEAgent-Bench: A Multi-Metric, Multi-Library Benchmark for PDE Solver Generation
