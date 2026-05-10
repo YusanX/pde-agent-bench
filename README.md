@@ -13,7 +13,6 @@
 [![Firedrake](https://img.shields.io/badge/Firedrake-2025-green.svg)]()
 [![deal.II](https://img.shields.io/badge/deal.II-9.x-red.svg)]()
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![NeurIPS](https://img.shields.io/badge/NeurIPS%202026-Under%20Review-blueviolet.svg)]()
 
 **A Multi-Metric, Multi-Library Benchmark for PDE Solver Generation**
 
@@ -31,27 +30,18 @@ PDEAgent-Bench is a comprehensive benchmark that evaluates whether AI agents can
 
 <table>
 <tr>
-<td align="center" width="25%">🔢<br/><b>Multi-Backend Support</b><br/><sub>DOLFINx (Python), Firedrake (Python), deal.II (C++)</sub></td>
+<td align="center" width="25%">🔢<br/><b>Multi-Library Support</b><br/><sub>DOLFINx (Python), Firedrake (Python), deal.II (C++)</sub></td>
 <td align="center" width="25%">📐<br/><b>11 PDE Types</b><br/><sub>From Poisson to Navier-Stokes, covering classical and multi-physics</sub></td>
 <td align="center" width="25%">📊<br/><b>Two-Metric Evaluation</b><br/><sub>Accuracy (rel. L2 error) + efficiency (runtime) vs oracle</sub></td>
 <td align="center" width="25%">🤖<br/><b>Multi-Agent & Multi-LLM</b><br/><sub>OpenAI, Anthropic, Google, Qwen and code agent frameworks</sub></td>
 </tr>
 <tr>
-<td align="center">📦<br/><b>Two Dataset Versions</b><br/><sub>v1: 241 cases (DOLFINx) · v2: 645 cases (all backends)</sub></td>
+<td align="center">📦<br/><b>Two Dataset Versions</b><br/><sub>v1: 241 cases (DOLFINx) · v2: 645 cases (all libraries)</sub></td>
 <td align="center">🐳<br/><b>Docker-Ready</b><br/><sub>Firedrake and deal.II run in containers, zero local setup</sub></td>
 <td align="center">🔁<br/><b>Multi-Attempt Mode</b><br/><sub>Agents can self-correct with error feedback across attempts</sub></td>
 <td align="center">⚡<br/><b>Single Entry Point</b><br/><sub>One script to run, compare, and reproduce all experiments</sub></td>
 </tr>
 </table>
-
-### 📢 News
-
-- **2026-05** 🚀 Initial public release of PDEAgent-Bench v2 with 645 cases across DOLFINx, Firedrake, and deal.II backends.
-- **2026-05** 🤗 Dataset released on [Hugging Face](https://huggingface.co/datasets/eclipse00/PDEAgent-Bench), including both v1 and v2 benchmark cases.
-- **2026-05** 🌐 [Project website and leaderboard](https://zeroeclipse00.github.io/pde-agent-bench-github-pages/) launched with real-time results.
-- **2026-04** 📝 PDEAgent-Bench submitted to NeurIPS 2026 (under review).
-
----
 
 ## Understanding the Benchmark
 
@@ -82,7 +72,7 @@ Both metrics must pass their thresholds for a case to count as solved.
 
 PDEAgent-Bench v2 covers 11 PDE categories spanning classical and multi-physics problems:
 
-| PDE Type | Description | Backends |
+| PDE Type | Description | Libraries |
 |:---|:---|:---:|
 | **Poisson** | Elliptic boundary value problem | DOLFINx · Firedrake · deal.II |
 | **Heat** | Parabolic time-dependent diffusion | DOLFINx · Firedrake · deal.II |
@@ -100,9 +90,9 @@ PDEAgent-Bench v2 covers 11 PDE categories spanning classical and multi-physics 
 
 View the full, up-to-date leaderboard on our **[project website](https://zeroeclipse00.github.io/pde-agent-bench-github-pages/)**.
 
-The leaderboard reports per-backend pass rates and aggregated scores across all 11 PDE types, broken down by:
+The leaderboard reports per-library pass rates and aggregated scores across all 11 PDE types, broken down by:
 - **Model** (GPT-4o, Claude Sonnet/Opus, Gemini, Qwen, …)
-- **Backend** (DOLFINx · Firedrake · deal.II)
+- **Library** (DOLFINx · Firedrake · deal.II)
 - **Dataset version** (v1 · v2)
 - **Attempt mode** (single-attempt · multi-attempt)
 
@@ -122,7 +112,7 @@ conda install -c conda-forge fenics-dolfinx=0.10.0 mpich petsc4py
 pip install -e .
 ```
 
-> **Firedrake / deal.II**: These two backends run through Docker by default and do not require local installation.  
+> **Firedrake / deal.II**: These two libraries run through Docker by default and do not require local installation.  
 > Add `--solver-library firedrake` or `--solver-library dealii` at runtime to invoke the corresponding image automatically.
 
 ### 2. Configure API Keys
@@ -150,10 +140,10 @@ python scripts/run_benchmark.py --agent gpt-4o
 # Evaluate and compare multiple LLMs
 python scripts/run_benchmark.py --agent gpt-4o sonnet-3.5 gemini
 
-# Use the Firedrake backend (Docker invoked automatically)
+# Use the Firedrake library (Docker invoked automatically)
 python scripts/run_benchmark.py --agent gpt-4o --solver-library firedrake
 
-# Use the deal.II backend (agent generates C++, Docker invoked automatically)
+# Use the deal.II library (agent generates C++, Docker invoked automatically)
 python scripts/run_benchmark.py --agent gpt-4o --solver-library dealii
 
 # Test only the v1 dataset with 241 DOLFINx cases
@@ -206,7 +196,7 @@ python scripts/run_benchmark.py --agent qwen3-max \
 |:---|:---|:---|
 | `--agent` | Required | LLM name; multiple agents supported. See the list below. |
 | `--version` | `v2` | Dataset version: `v1` (241 cases) or `v2` (645 cases). |
-| `--solver-library` | `dolfinx` | Solver backend: `dolfinx` \| `firedrake` \| `dealii`. |
+| `--solver-library` | `dolfinx` | Solver library: `dolfinx` \| `firedrake` \| `dealii`. |
 | `--cases` | All | Case IDs to evaluate, separated by spaces. |
 | `--equation-types` | All | Equation types to evaluate, e.g. `poisson heat`. |
 | `--max-attempts` | `1` | Maximum attempts in multi-attempt mode. |
@@ -248,9 +238,9 @@ Code agents use the same prompts as LLMs. Environment variables and timeouts are
 
 The benchmark dataset is available on [Hugging Face](https://huggingface.co/datasets/eclipse00/PDEAgent-Bench).
 
-### v2 (Recommended, 645 Cases)
+### Dataset Format (v2, 645 Cases)
 
-`data/benchmark_v2.jsonl` — one JSON object per line, covers all three solver backends:
+`data/benchmark_v2.jsonl` — one JSON object per line, covers all three solver libraries:
 
 ```json
 {
@@ -271,10 +261,6 @@ The benchmark dataset is available on [Hugging Face](https://huggingface.co/data
   "supported_libraries": ["dolfinx", "firedrake", "dealii"]
 }
 ```
-
-### v1 (241 Cases, DOLFINx Only)
-
-`data/benchmark_v1.jsonl` — a smaller subset for compatibility with earlier experiments, supports only the `dolfinx` backend.
 
 ---
 
@@ -298,8 +284,8 @@ pdebench/
 │   ├── oracle/                 # Oracle reference solution system
 │   │   ├── oracle.py           # Unified entry point dispatching by PDE type
 │   │   ├── {pde_type}.py       # DOLFINx implementation for each PDE
-│   │   ├── firedrake_oracle/   # Firedrake backend implementation
-│   │   ├── dealii_oracle/      # deal.II backend with .cc programs
+│   │   ├── firedrake_oracle/   # Firedrake library implementation
+│   │   ├── dealii_oracle/      # deal.II library with .cc programs
 │   │   └── docker_bridge.py    # Bridge for running inside Docker containers
 │   │
 │   ├── sandbox/
@@ -341,7 +327,7 @@ pdebench/
 
 ## 🐳 Docker Support
 
-The Firedrake and deal.II backends run in Docker containers by default:
+The Firedrake and deal.II libraries run in Docker containers by default:
 
 ```bash
 # Pull images
