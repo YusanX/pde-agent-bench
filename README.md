@@ -36,7 +36,7 @@ PDEAgent-Bench is a comprehensive benchmark that evaluates whether AI agents can
 <td align="center" width="25%">🤖<br/><b>Multi-Agent & Multi-LLM</b><br/><sub>OpenAI, Anthropic, Google, Qwen and code agent frameworks</sub></td>
 </tr>
 <tr>
-<td align="center">📦<br/><b>Two Dataset Versions</b><br/><sub>v1: 241 cases (DOLFINx) · v2: 645 cases (all libraries)</sub></td>
+<td align="center">📦<br/><b>645 Benchmark Cases</b><br/><sub>Covering all three solver libraries and 11 PDE types</sub></td>
 <td align="center">🐳<br/><b>Docker-Ready</b><br/><sub>Firedrake and deal.II run in containers, zero local setup</sub></td>
 <td align="center">🔁<br/><b>Multi-Attempt Mode</b><br/><sub>Agents can self-correct with error feedback across attempts</sub></td>
 <td align="center">⚡<br/><b>Single Entry Point</b><br/><sub>One script to run, compare, and reproduce all experiments</sub></td>
@@ -93,7 +93,6 @@ View the full, up-to-date leaderboard on our **[project website](https://zeroecl
 The leaderboard reports per-library pass rates and aggregated scores across all 11 PDE types, broken down by:
 - **Model** (GPT-4o, Claude Sonnet/Opus, Gemini, Qwen, …)
 - **Library** (DOLFINx · Firedrake · deal.II)
-- **Dataset version** (v1 · v2)
 - **Attempt mode** (single-attempt · multi-attempt)
 
 ---
@@ -146,8 +145,6 @@ python scripts/run_benchmark.py --agent gpt-4o --solver-library firedrake
 # Use the deal.II library (agent generates C++, Docker invoked automatically)
 python scripts/run_benchmark.py --agent gpt-4o --solver-library dealii
 
-# Test only the v1 dataset with 241 DOLFINx cases
-python scripts/run_benchmark.py --agent gpt-4o --version v1
 ```
 
 ---
@@ -158,7 +155,7 @@ All evaluations run through the single entry point `scripts/run_benchmark.py`:
 
 ```
 usage: run_benchmark.py [-h] --agent AGENT [AGENT ...] [--output OUTPUT]
-                        [--version {v1,v2}] [--cases CASE_ID ...]
+                        [--version v2] [--cases CASE_ID ...]
                         [--equation-types TYPE ...] [--skip-generation]
                         [--solver-path PATH] [--eval-existing-dir DIR]
                         [--timeout SECONDS] [--max-attempts N]
@@ -195,7 +192,7 @@ python scripts/run_benchmark.py --agent qwen3-max \
 | Argument | Default | Description |
 |:---|:---|:---|
 | `--agent` | Required | LLM name; multiple agents supported. See the list below. |
-| `--version` | `v2` | Dataset version: `v1` (241 cases) or `v2` (645 cases). |
+| `--version` | `v2` | Dataset version (`v2`, 645 cases). |
 | `--solver-library` | `dolfinx` | Solver library: `dolfinx` \| `firedrake` \| `dealii`. |
 | `--cases` | All | Case IDs to evaluate, separated by spaces. |
 | `--equation-types` | All | Equation types to evaluate, e.g. `poisson heat`. |
@@ -269,8 +266,7 @@ The benchmark dataset is available on [Hugging Face](https://huggingface.co/data
 ```
 pdebench/
 ├── data/
-│   ├── benchmark_v1.jsonl      # v1 dataset (241 cases, DOLFINx)
-│   └── benchmark_v2.jsonl      # v2 dataset (645 cases, multi-backend)
+│   └── benchmark_v2.jsonl      # v2 dataset (645 cases, multi-library)
 │
 ├── scripts/
 │   └── run_benchmark.py        # Single evaluation entry point
