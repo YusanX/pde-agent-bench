@@ -1,0 +1,269 @@
+{
+  "@context": {
+    "@language": "en",
+    "@vocab": "https://schema.org/",
+    "citeAs": "cr:citeAs",
+    "column": "cr:column",
+    "conformsTo": "dct:conformsTo",
+    "cr": "http://mlcommons.org/croissant/",
+    "rai": "http://mlcommons.org/croissant/RAI/",
+    "data": {
+      "@id": "cr:data",
+      "@type": "@json"
+    },
+    "dataType": {
+      "@id": "cr:dataType",
+      "@type": "@vocab"
+    },
+    "dct": "http://purl.org/dc/terms/",
+    "equivalentProperty": "cr:equivalentProperty",
+    "examples": {
+      "@id": "cr:examples",
+      "@type": "@json"
+    },
+    "extract": "cr:extract",
+    "field": "cr:field",
+    "fileProperty": "cr:fileProperty",
+    "fileObject": "cr:fileObject",
+    "fileSet": "cr:fileSet",
+    "format": "cr:format",
+    "includes": "cr:includes",
+    "isLiveDataset": "cr:isLiveDataset",
+    "jsonPath": "cr:jsonPath",
+    "key": "cr:key",
+    "md5": "cr:md5",
+    "parentField": "cr:parentField",
+    "path": "cr:path",
+    "recordSet": "cr:recordSet",
+    "references": "cr:references",
+    "regex": "cr:regex",
+    "repeated": "cr:repeated",
+    "replace": "cr:replace",
+    "samplingRate": "cr:samplingRate",
+    "sc": "https://schema.org/",
+    "separator": "cr:separator",
+    "source": "cr:source",
+    "subField": "cr:subField",
+    "transform": "cr:transform",
+    "prov": "http://www.w3.org/ns/prov#"
+  },
+  "@type": "sc:Dataset",
+  "name": "PDEAgent-Bench",
+  "alternateName": "PDEAgent-Bench",
+  "description": "PDEAgent-Bench is a benchmark for evaluating the end-to-end ability of large language models and AI agents to generate solver code for partial differential equations (PDEs). Given a natural-language description of a PDE problem, an agent must produce a complete finite-element solver (e.g. for FEniCSx/dolfinx, Firedrake, or deal.II). The dataset (benchmark_v2.jsonl) contains 645 cases spanning 11 equation families (Poisson, heat, wave, Burgers, convection-diffusion, reaction-diffusion, Helmholtz, biharmonic, linear elasticity, Stokes, Navier-Stokes) and 6 mathematical categories. Each record specifies an oracle solver configuration, an evaluation strategy, the agent-tunable knobs, and the supported FEM libraries.",
+  "conformsTo": "http://mlcommons.org/croissant/1.0",
+  "license": "https://creativecommons.org/licenses/by/4.0/",
+  "url": "https://github.com/YusanX/pde-agent-bench",
+  "version": "2.0.0",
+  "datePublished": "2026-05-04",
+  "keywords": [
+    "PDE-to-solver code generation",
+    "code agents",
+    "numerical PDEs",
+    "benchmark",
+    "multi-metric evaluation",
+    "scientific computing",
+    "partial differential equations",
+    "PDE",
+    "finite element method",
+    "FEM",
+    "FEniCSx",
+    "dolfinx",
+    "Firedrake",
+    "deal.II"
+  ],
+  "creator": {
+    "@type": "Organization",
+    "name": "PDEAgent-Bench Authors"
+  },
+  "publisher": {
+    "@type": "Organization",
+    "name": "PDEAgent-Bench Authors"
+  },
+  "citeAs": "@misc{pdeagentbench2026, title={PDEAgent-Bench: A Multi-Metric Benchmark for PDE-to-Solver Code Generation}, author={PDEAgent-Bench Authors}, year={2026}}",
+  "isLiveDataset": false,
+  "distribution": [
+    {
+      "@type": "cr:FileObject",
+      "@id": "benchmark_v2.jsonl",
+      "name": "benchmark_v2.jsonl",
+      "description": "JSON-Lines file in which each line is a self-contained PDE benchmark case.",
+      "contentUrl": "benchmark_v2.jsonl",
+      "encodingFormat": "application/jsonlines",
+      "contentSize": "878771 B",
+      "sha256": "87eee271980809cbeca9930c3addebd4caf1e659604bb9a50c6f92b1cfe9bd6e",
+      "md5": "ebeaae607c8aa1ab0fea941acf260259"
+    }
+  ],
+  "recordSet": [
+    {
+      "@type": "cr:RecordSet",
+      "@id": "cases",
+      "name": "cases",
+      "description": "One record per PDE benchmark case (645 cases in total).",
+      "key": {
+        "@id": "cases/id"
+      },
+      "field": [
+        {
+          "@type": "cr:Field",
+          "@id": "cases/id",
+          "name": "id",
+          "description": "Unique case identifier (e.g., 'poisson_basic').",
+          "dataType": "sc:Text",
+          "source": {
+            "fileObject": {
+              "@id": "benchmark_v2.jsonl"
+            },
+            "extract": {
+              "column": "id"
+            },
+            "transform": {
+              "jsonPath": "$.id"
+            }
+          }
+        },
+        {
+          "@type": "cr:Field",
+          "@id": "cases/equation_type",
+          "name": "equation_type",
+          "description": "PDE family used to select the oracle solver. One of: poisson, heat, wave, burgers, convection_diffusion, reaction_diffusion, helmholtz, biharmonic, linear_elasticity, stokes, navier_stokes.",
+          "dataType": "sc:Text",
+          "source": {
+            "fileObject": {
+              "@id": "benchmark_v2.jsonl"
+            },
+            "extract": {
+              "column": "pde_classification"
+            },
+            "transform": {
+              "jsonPath": "$.pde_classification.equation_type"
+            }
+          }
+        },
+        {
+          "@type": "cr:Field",
+          "@id": "cases/math_type",
+          "name": "math_type",
+          "description": "Mathematical classification tags covering 6 categories. A case may have multiple tags.",
+          "dataType": "sc:Text",
+          "repeated": true,
+          "source": {
+            "fileObject": {
+              "@id": "benchmark_v2.jsonl"
+            },
+            "extract": {
+              "column": "pde_classification"
+            },
+            "transform": {
+              "jsonPath": "$.pde_classification.math_type[*]"
+            }
+          }
+        },
+        {
+          "@type": "cr:Field",
+          "@id": "cases/oracle_config",
+          "name": "oracle_config",
+          "description": "Oracle solver configuration: PDE definition (coefficients, manufactured solution), domain, mesh, finite-element family/degree, boundary conditions, output format/grid, and linear-solver settings (ksp_type, pc_type, rtol). Stored as a JSON object.",
+          "dataType": "sc:Text",
+          "source": {
+            "fileObject": {
+              "@id": "benchmark_v2.jsonl"
+            },
+            "extract": {
+              "column": "oracle_config"
+            }
+          }
+        },
+        {
+          "@type": "cr:Field",
+          "@id": "cases/evaluation_config",
+          "name": "evaluation_config",
+          "description": "Evaluation strategy: target metric (e.g., rel_L2_grid), timeout in seconds, and tolerance multipliers for accuracy and time. Stored as a JSON object.",
+          "dataType": "sc:Text",
+          "source": {
+            "fileObject": {
+              "@id": "benchmark_v2.jsonl"
+            },
+            "extract": {
+              "column": "evaluation_config"
+            }
+          }
+        },
+        {
+          "@type": "cr:Field",
+          "@id": "cases/agent_knobs",
+          "name": "agent_knobs",
+          "description": "List of solver knobs the agent is expected to choose (each with a name and natural-language description), e.g., mesh_resolution, element_degree, ksp_type, pc_type, rtol. Stored as a JSON array.",
+          "dataType": "sc:Text",
+          "source": {
+            "fileObject": {
+              "@id": "benchmark_v2.jsonl"
+            },
+            "extract": {
+              "column": "agent_knobs"
+            }
+          }
+        },
+        {
+          "@type": "cr:Field",
+          "@id": "cases/supported_libraries",
+          "name": "supported_libraries",
+          "description": "FEM libraries that an agent may use to implement the solver (e.g., dolfinx, firedrake, dealii).",
+          "dataType": "sc:Text",
+          "repeated": true,
+          "source": {
+            "fileObject": {
+              "@id": "benchmark_v2.jsonl"
+            },
+            "extract": {
+              "column": "supported_libraries"
+            },
+            "transform": {
+              "jsonPath": "$.supported_libraries[*]"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "rai:dataLimitations": "This dataset covers 11 PDE families — including nonlinear and coupled systems such as Navier–Stokes and reaction-diffusion equations — on canonical 2D and selected 3D domains, and may not generalise to singular or discontinuous solutions, highly irregular geometries, non-FEM numerical paradigms, or PDE regimes absent from the benchmark (e.g. high-Reynolds-number turbulence, fractional-order, or high-dimensional problems). It is not recommended for use as training data for systems subsequently evaluated on it, or as standalone evidence that agent-generated solver code is suitable for safety-critical engineering applications without independent validation.",
+  "rai:dataBiases": "The benchmark is constructed from curated FEM textbook problems, introducing a selection bias toward well-posed, smooth, low-dimensional PDEs on regular domains, with elliptic/Poisson cases comprising a substantial majority of all instances. Nonlinear, hyperbolic, and coupled-flow regimes are under-represented, which may cause agents trained or selected on this benchmark to perform disproportionately well on elliptic problems while underperforming on more complex or irregular settings.",
+  "rai:personalSensitiveInformation": "The dataset contains no personal or sensitive information in any of the following categories: Gender, Socio-economic status, Geography, Language, Age, Culture, Experience or Seniority, Health or medical data, Political or religious beliefs. Every record is a fully synthetic mathematical specification of a PDE problem and its solver configuration.",
+  "rai:dataUseCases": "This dataset measures the ability of AI agents to translate natural-language PDE specifications into correct, runnable FEM solver code. Validated use cases: zero-shot and few-shot evaluation of LLMs and coding agents on FEM code generation (see accompanying paper). Not validated for agent fine-tuning and non-FEM numerical paradigms.",
+  "rai:dataSocialImpact": "Positive impact: enables reproducible, standardised evaluation of AI agents on scientific code generation, supporting transparent progress tracking in computational science research. Risks: misuse as training data for systems subsequently evaluated on this benchmark, or over-interpreting benchmark scores as evidence that agent-generated solvers are safe for deployment in engineering practice. Mitigation: the dataset is released under CC-BY-4.0 with explicit usage guidance discouraging training use, and reference solutions are computed deterministically from numerical oracles, eliminating subjective human annotation bias.",
+  "rai:hasSyntheticData": true,
+  "prov:wasGeneratedBy": [
+    {
+      "@type": "prov:Activity",
+      "prov:type": {
+        "@id": "https://www.wikidata.org/wiki/Q4929239"
+      },
+      "prov:label": "PDE Problem Template Design",
+      "sc:description": "Research team manually designed problem templates covering 11 PDE families, specifying domain configurations, boundary conditions, coefficient ranges, and oracle solver parameters."
+    },
+    {
+      "@type": "prov:Activity",
+      "prov:type": {
+        "@id": "https://www.wikidata.org/wiki/Q109719325"
+      },
+      "prov:label": "Synthetic Problem Instance Generation",
+      "sc:description": "Problem instances were synthetically generated using Claude Opus 4.6 (Anthropic) and Gemini 3.1 Pro (Google) via structured prompting pipelines. Each model received a problem template and produced a natural-language PDE description along with a complete oracle solver configuration."
+    },
+    {
+      "@type": "prov:Activity",
+      "prov:type": {
+        "@id": "https://www.wikidata.org/wiki/Q5227332"
+      },
+      "prov:label": "Oracle Execution and Quality Filtering",
+      "sc:description": "Every generated case was validated by executing the oracle FEM solver (FEniCSx/dolfinx, Firedrake, or deal.II) and verifying numerical convergence against the reference solution. Cases failing solver execution, convergence checks, or schema validation were discarded before the final dataset was assembled."
+    }
+  ],
+  "prov:wasDerivedFrom": [
+    {
+      "@id": "N/A",
+      "prov:label": "No external source dataset",
+      "sc:license": "CC-BY-4.0"
+    }
+  ]
+}
