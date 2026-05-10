@@ -33,7 +33,7 @@ PDEAgent-Bench is a comprehensive benchmark that evaluates whether AI agents can
 <td align="center" width="25%">🔢<br/><b>Multi-Library Support</b><br/><sub>DOLFINx (Python), Firedrake (Python), deal.II (C++)</sub></td>
 <td align="center" width="25%">📐<br/><b>11 PDE Types</b><br/><sub>From Poisson to Navier-Stokes, covering classical and multi-physics</sub></td>
 <td align="center" width="25%">📊<br/><b>Two-Metric Evaluation</b><br/><sub>Accuracy (rel. L2 error) + efficiency (runtime) vs oracle</sub></td>
-<td align="center" width="25%">🤖<br/><b>Multi-Agent & Multi-LLM</b><br/><sub>OpenAI, Anthropic, Google, Qwen and code agent frameworks</sub></td>
+<td align="center" width="25%">🤖<br/><b>Multi-Agent &<br/>Multi-LLM</b><br/><sub>OpenAI, Anthropic, Google, Qwen and code agent frameworks</sub></td>
 </tr>
 <tr>
 <td align="center">📦<br/><b>645 Benchmark Cases</b><br/><sub>Covering all three solver libraries and 11 PDE types</sub></td>
@@ -50,14 +50,14 @@ PDEAgent-Bench is a comprehensive benchmark that evaluates whether AI agents can
 PDEAgent-Bench follows a two-stage pipeline:
 
 ```
-┌─────────────────────────────────┐    ┌──────────────────────────────────┐
-│  Stage 1 — Code Generation      │    │  Stage 2 — Evaluation            │
-│                                 │    │                                  │
-│  Natural language PDE problem   │    │  Generated solver                │
-│      +  API reference guide     │───▶│      vs Oracle reference solution│
-│                                 │    │                                  │
-│  AI Agent / LLM                 │    │  Metrics: rel. L2 error + runtime│
-└─────────────────────────────────┘    └──────────────────────────────────┘
+┌─────────────────────────────────┐     ┌───────────────────────────────────┐
+│  Stage 1 — Code Generation      │     │  Stage 2 — Evaluation             │
+│                                 │     │                                   │
+│  Natural language PDE problem   │     │  Generated solver                 │
+│      +  API reference guide     │───▶│      vs Oracle reference solution │
+│                                 │     │                                   │
+│  AI Agent / LLM                 │     │  Metrics: rel. L2 error + runtime │
+└─────────────────────────────────┘     └───────────────────────────────────┘
 ```
 
 **Stage 1 — Code Generation:**  The agent receives a PDE problem description in natural language together with an injected API reference guide for the target solver library (DOLFINx, Firedrake, or deal.II). It must produce complete, runnable solver code — no scaffolding, no partial templates.
