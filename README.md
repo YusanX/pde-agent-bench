@@ -12,7 +12,7 @@
 [![DOLFINx](https://img.shields.io/badge/DOLFINx-0.10.0-orange.svg)]()
 [![Firedrake](https://img.shields.io/badge/Firedrake-2025-green.svg)]()
 [![deal.II](https://img.shields.io/badge/deal.II-9.x-red.svg)]()
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-CC%20BY%204.0-lightgrey.svg)](LICENSE)
 
 **A Multi-Metric, Multi-Library Benchmark for PDE Solver Generation**
 
@@ -389,7 +389,7 @@ If you use PDEAgent-Bench in your research, please cite our paper:
 
 ## License
 
-This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.
+This project is licensed under the [Creative Commons Attribution 4.0 International License (CC BY 4.0)](LICENSE).
 
 ## Acknowledgements
 
