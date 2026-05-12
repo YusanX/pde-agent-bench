@@ -7,6 +7,7 @@
 # PDEAgent-Bench
 
 [![Official Site](https://img.shields.io/badge/Official%20Site-333399.svg?logo=homepage)](https://zeroeclipse00.github.io/pde-agent-bench-github-pages/)&#160;
+[![arXiv](https://img.shields.io/badge/arXiv-2605.09636-b31b1b.svg)](http://arxiv.org/abs/2605.09636)&#160;
 [![HuggingFace](https://img.shields.io/badge/%F0%9F%A4%97%20HuggingFace-gray)](https://huggingface.co/datasets/eclipse00/PDEAgent-Bench)&#160;
 [![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/)
 [![DOLFINx](https://img.shields.io/badge/DOLFINx-0.10.0-orange.svg)]()
@@ -375,9 +376,11 @@ If you use PDEAgent-Bench in your research, please cite our paper:
             Chao Yao, Zhanhua Hu, Jianqing Zhang, Pengwei Liu,
             Yaomin Shen, Xingyu Ren, Lei Liu, Zikang Xu, Han Li,
             Qingsong Yao, Hande Dong, Hong Wang},
-  year   = {2026},
-  note   = {Under review at NeurIPS 2026},
-  url    = {https://github.com/YusanX/pde-agent-bench}
+  year = {2026},
+  eprint = {2605.09636},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.AI},
+  url = {https://arxiv.org/abs/2605.09636}, 
 }
 ```
 
