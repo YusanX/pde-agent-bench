@@ -367,17 +367,14 @@ Add an entry to the `SUPPORTED_AGENTS` dictionary in `pdebench/core/llm_client.p
 If you use PDEAgent-Bench in your research, please cite our paper:
 
 ```bibtex
-@misc{hang2026pdeagentbench,
-  title  = {PDEAgent-Bench: A Multi-Metric, Multi-Library Benchmark for PDE Solver Generation},
-  author = {Zhen Hang, Yushan Yashengjiang, Junhui Li, Huanshuo Dong,
-            Yang Wei, Zhezheng Hao, Jiangtao Ma, Songlin Bai,
-            Zhongkai Hao, Xihang Yue, Gangzong Si, Dongming Jiang,
-            Chao Yao, Zhanhua Hu, Jianqing Zhang, Pengwei Liu,
-            Yaomin Shen, Xingyu Ren, Lei Liu, Zikang Xu, Han Li,
-            Qingsong Yao, Hande Dong, Hong Wang},
-  year   = {2026},
-  note   = {Under review at NeurIPS 2026},
-  url    = {https://github.com/YusanX/pde-agent-bench}
+@misc{hang2026pdeagentbenchmultimetricmultilibrarybenchmark,
+      title={PDEAgent-Bench: A Multi-Metric, Multi-Library Benchmark for PDE Solver Generation}, 
+      author={Zhen Hang and Yushan Yashengjiang and Junhui Li and Huanshuo Dong and Yang Wei and Zhezheng Hao and Jiangtao Ma and Songlin Bai and Haozhong Kai and Xihang Yue and Gangzong Si and Dongming Jiang and Chao Yao and Zhanhua Hu and Jiangqing Zhang and Pengwei Liu and Yaomin Shen and Xingyu Ren and Lei Liu and Zikang Xu and Han Li and Qingsong Yao and Hande Dong and Hong Wang},
+      year={2026},
+      eprint={2605.09636},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2605.09636}, 
 }
 ```
 
