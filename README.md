@@ -186,7 +186,13 @@ python scripts/run_benchmark.py --agent gpt-4o \
 # Batch-evaluate all solvers in an existing directory without re-calling the LLM
 python scripts/run_benchmark.py --agent qwen3-max \
     --eval-existing-dir results/qwen3-max
+
+# Smoke test: run one small case to verify the installation
+python scripts/run_benchmark.py --agent gpt-4o --cases poisson_basic --timeout 60
+
 ```
+
+
 
 ### Arguments
 
