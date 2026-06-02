@@ -21,7 +21,7 @@
 
 </div>
 
----
+---   
 
 PDEAgent-Bench is a comprehensive benchmark that evaluates whether AI agents can **work like computational scientists** — given a PDE problem described in natural language, generate complete, correct, and efficient finite element solver code. It covers three major FEM frameworks and 11 PDE types, measuring both solution accuracy (relative L2 error) and runtime efficiency against oracle reference solutions.
 
