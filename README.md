@@ -16,7 +16,7 @@
 [![License](https://img.shields.io/badge/License-CC%20BY%204.0-lightgrey.svg)](LICENSE)
 
 **A Multi-Metric, Multi-Library Benchmark for PDE Solver Generation**
-
+ 
 [Quick Start](#-quick-start) | [How It Works](#️-how-it-works) | [PDE Types](#-pde-types-covered) | [Leaderboard](#-leaderboard) | [Dataset](#-datasets) | [Citation](#-citation)
 
 </div>
