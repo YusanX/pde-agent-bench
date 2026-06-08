@@ -28,7 +28,7 @@ PDEAgent-Bench is a comprehensive benchmark that evaluates whether AI agents can
 ## Overview
 
 ### ✨ Highlights
-  
+   
 <table>
 <tr>
 <td align="center" width="25%">🔢<br/><b>Multi-Library Support</b><br/><sub>DOLFINx (Python), Firedrake (Python), deal.II (C++)</sub></td>
