@@ -71,10 +71,10 @@ Both metrics must pass their thresholds for a case to count as solved.
 
 ### 🧮 PDE Types Covered
 
-PDEAgent-Bench v2 covers 11 PDE categories spanning classical and multi-physics problems:
+PDEAgent-Bench v2 covers 11 PDE categories spanning classical and multi-physics problems:   
 
 | PDE Type | Description | Libraries |
-|:---|:---|:---:|
+|:---|:---|:---:|    
 | **Poisson** | Elliptic boundary value problem | DOLFINx · Firedrake · deal.II |
 | **Heat** | Parabolic time-dependent diffusion | DOLFINx · Firedrake · deal.II |
 | **Wave** | Hyperbolic second-order wave equation | DOLFINx · Firedrake · deal.II |
